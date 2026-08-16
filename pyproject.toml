@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neutron-star-eos-toolkit"
+version = "0.1.0"
+description = "Analytical, CSV, and CompOSE cold-EoS inputs with background TOV models"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{name = "Ioannis Papathanasiou"}]
+dependencies = [
+  "numpy==1.26.4",
+  "scipy==1.13.1",
+]
+
+[project.scripts]
+eos-tool = "neutron_star_eos.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["neutron_star_eos*"]
+exclude = ["tests*"]
+namespaces = false

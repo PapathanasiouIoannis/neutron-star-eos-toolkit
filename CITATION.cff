@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: If you use this software, cite the archived release associated with your results.
+title: Neutron-star EoS toolkit
+type: software
+version: 0.1.0
+authors:
+  - family-names: Papathanasiou
+    given-names: Ioannis
+    affiliation: Department of Theoretical Physics, AUTh
