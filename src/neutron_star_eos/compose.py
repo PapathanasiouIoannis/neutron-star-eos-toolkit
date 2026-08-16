@@ -1,269 +1,487 @@
-"""Fail-closed reader for cold one-dimensional CompOSE barotropes."""
+"""Construction of continuous cold barotropes from parsed CompOSE data."""
 
 from __future__ import annotations
 
 import copy
-import hashlib
-import zipfile
-from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.polynomial import Polynomial
+from scipy.interpolate import PchipInterpolator
+from scipy.optimize import brentq
 
-from neutron_star_eos.eos import EosInputError
-from neutron_star_eos.tabulated import TabulatedEos
-
-
-COMPOSE_PARSER_VERSION = "compose_cold_1d_v1"
-COMPOSE_FORMAT_AUTHORITY = (
-    "CompOSE Reference Manual v3.01, sections 4.2.1-4.2.3 and 4.2.7"
+from neutron_star_eos.compose_dataset import (
+    COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
+    COMPOSE_DATASET_SCHEMA_VERSION,
+    COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
+    COMPOSE_FORMAT_AUTHORITY,
+    ComposeColdSlice,
+    ComposeDataset,
+    ComposeSliceReport,
+    load_compose_dataset,
 )
-# Source-row redundancy check, not a stellar-solver tolerance. The fixed value
-# accommodates decimal serialization while remaining tighter than 0.1 ppm.
-COMPOSE_EULER_CLOSURE_RELATIVE_TOLERANCE = 1.0e-7
-# Q5 and Q6-Q7 are dimensionless. This source-row tolerance accommodates
-# ordinary decimal serialization while remaining far below a keV per baryon.
-COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE = 1.0e-7
-REQUIRED_FILES = ("eos.t", "eos.nb", "eos.yq", "eos.thermo")
+from neutron_star_eos.eos import (
+    CANONICAL_ENERGY_DENSITY_CONVENTION,
+    CANONICAL_UNITS,
+    EOS_INPUT_SCHEMA_VERSION,
+    EosDomainError,
+    EosInputError,
+    EosValidationIssue,
+    EosValidationReport,
+    _domain_values,
+    _scalar_or_array,
+)
 
 
-@dataclass(frozen=True, slots=True)
-class _Axis:
-    minimum_index: int
-    maximum_index: int
-    values: np.ndarray
-
-    @property
-    def indices(self) -> tuple[int, ...]:
-        return tuple(range(self.minimum_index, self.maximum_index + 1))
+COMPOSE_BAROTROPE_SCHEMA_VERSION = "compose_native_density_barotrope_v2"
+COMPOSE_INTERPOLATION_POLICY = "separate_log_pchip_in_native_baryon_density_v1"
+COMPOSE_ORDERING_POLICIES = (
+    "strict",
+    "diagnostic_monotone_subsequence",
+    "diagnostic_keep_later_monotone_subsequence",
+)
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _readonly(values: np.ndarray) -> np.ndarray:
+    result = values.view()
+    result.setflags(write=False)
+    return result
 
 
-def _ascii(name: str, data: bytes) -> list[str]:
-    try:
-        return data.decode("ascii").splitlines()
-    except UnicodeDecodeError as exc:
-        raise EosInputError(f"CompOSE file {name} is not ASCII") from exc
+class ComposeEos:
+    """Continuous CompOSE barotrope constructed in native baryon density.
 
+    Pressure and total energy density are interpolated separately as functions
+    of baryon density. The sound speed follows from their derivative ratio.
+    This is a declared toolkit policy, not a source-supplied analytical form.
+    """
 
-def _parse_axis(name: str, data: bytes) -> _Axis:
-    lines = [line.strip() for line in _ascii(name, data) if line.strip()]
-    if len(lines) < 3:
-        raise EosInputError(f"CompOSE axis {name} is incomplete")
-    try:
-        minimum = int(lines[0])
-        maximum = int(lines[1])
-        values = np.asarray(
-            [float(token) for line in lines[2:] for token in line.split()], dtype=float
-        )
-    except ValueError as exc:
-        raise EosInputError(f"CompOSE axis {name} contains invalid values") from exc
-    expected = maximum - minimum + 1
-    if expected <= 0 or len(values) != expected:
-        raise EosInputError(
-            f"CompOSE axis {name} declares {expected} values but contains {len(values)}"
-        )
-    if not np.all(np.isfinite(values)) or np.any(np.diff(values) <= 0.0):
-        if len(values) != 1 or not np.all(np.isfinite(values)):
-            raise EosInputError(f"CompOSE axis {name} must be finite and strictly increasing")
-    return _Axis(minimum, maximum, values)
-
-
-def _bundle_from_directory(path: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
-    files: dict[str, bytes] = {}
-    for name in (*REQUIRED_FILES, "eos.compo", "eos.init", "eos.mr"):
-        candidate = path / name
-        if candidate.is_file():
-            files[name] = candidate.read_bytes()
-    return files, {"kind": "directory", "path_name": path.name}
-
-
-def _bundle_from_zip(path: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
-    files: dict[str, bytes] = {}
-    with zipfile.ZipFile(path) as archive:
-        members = [item for item in archive.infolist() if not item.is_dir()]
-        for name in (*REQUIRED_FILES, "eos.compo", "eos.init", "eos.mr"):
-            matches = [item for item in members if Path(item.filename).name == name]
-            if len(matches) > 1:
-                raise EosInputError(f"CompOSE archive contains multiple {name} files")
-            if matches:
-                files[name] = archive.read(matches[0])
-    raw = path.read_bytes()
-    return files, {
-        "kind": "zip",
-        "path_name": path.name,
-        "archive_bytes": len(raw),
-        "archive_sha256": _sha256(raw),
-    }
-
-
-def _read_bundle(path_or_zip: str | Path) -> tuple[dict[str, bytes], dict[str, Any]]:
-    path = Path(path_or_zip).expanduser().resolve()
-    if path.is_dir():
-        files, identity = _bundle_from_directory(path)
-    elif path.is_file() and zipfile.is_zipfile(path):
-        files, identity = _bundle_from_zip(path)
-    else:
-        raise EosInputError(f"CompOSE input must be a directory or ZIP archive: {path}")
-    missing = [name for name in REQUIRED_FILES if name not in files]
-    if missing:
-        raise EosInputError(f"CompOSE input is missing required files: {missing}")
-    identity["files"] = {
-        name: {"bytes": len(data), "sha256": _sha256(data)}
-        for name, data in sorted(files.items())
-    }
-    return files, identity
-
-
-def _parse_thermodynamics(
-    data: bytes,
-    *,
-    temperature: _Axis,
-    density: _Axis,
-    charge_fraction: _Axis,
-) -> tuple[float, float, int, dict[tuple[int, int, int], tuple[float, ...]], int]:
-    lines = [line.strip() for line in _ascii("eos.thermo", data) if line.strip()]
-    if len(lines) < 2:
-        raise EosInputError("CompOSE eos.thermo is incomplete")
-    header = lines[0].split()
-    if len(header) != 3:
-        raise EosInputError("CompOSE eos.thermo mass header is invalid")
-    try:
-        neutron_mass_mev = float(header[0])
-        proton_mass_mev = float(header[1])
-        lepton_indicator = int(header[2])
-    except ValueError as exc:
-        raise EosInputError("CompOSE mass/lepton header is invalid") from exc
-    if (
-        not np.isfinite(neutron_mass_mev)
-        or neutron_mass_mev <= 0.0
-        or not np.isfinite(proton_mass_mev)
-        or proton_mass_mev <= 0.0
-    ):
-        raise EosInputError("CompOSE neutron and proton masses must be finite and positive")
-
-    allowed_t = set(temperature.indices)
-    allowed_n = set(density.indices)
-    allowed_y = set(charge_fraction.indices)
-    rows: dict[tuple[int, int, int], tuple[float, ...]] = {}
-    duplicates = 0
-    for line_number, line in enumerate(lines[1:], start=2):
-        tokens = line.split()
-        if len(tokens) < 11:
-            raise EosInputError(f"CompOSE eos.thermo line {line_number} is too short")
-        try:
-            key = (int(tokens[0]), int(tokens[1]), int(tokens[2]))
-            quantities = tuple(float(value) for value in tokens[3:10])
-            additional_count = int(tokens[10])
-        except ValueError as exc:
-            raise EosInputError(
-                f"CompOSE eos.thermo line {line_number} contains invalid fields"
-            ) from exc
-        if key[0] not in allowed_t or key[1] not in allowed_n or key[2] not in allowed_y:
-            raise EosInputError(f"CompOSE eos.thermo line {line_number} has an out-of-grid index")
-        if additional_count < 0 or len(tokens) != 11 + additional_count:
-            raise EosInputError(
-                f"CompOSE eos.thermo line {line_number} has an invalid Nadd payload"
-            )
-        try:
-            additional = tuple(float(value) for value in tokens[11:])
-        except ValueError as exc:
-            raise EosInputError(
-                f"CompOSE eos.thermo line {line_number} has invalid additional values"
-            ) from exc
-        if not np.all(np.isfinite(quantities)) or not np.all(np.isfinite(additional)):
-            raise EosInputError(f"CompOSE eos.thermo line {line_number} is nonfinite")
-        duplicates += int(key in rows)
-        rows[key] = quantities
-    return neutron_mass_mev, proton_mass_mev, lepton_indicator, rows, duplicates
-
-
-def _parse_phase_codes(
-    data: bytes | None,
-    *,
-    expected_keys: tuple[tuple[int, int, int], ...],
-) -> tuple[int | None, ...] | None:
-    if data is None:
-        return None
-    mapping: dict[tuple[int, int, int], int] = {}
-    allowed = set(expected_keys)
-    for line_number, line in enumerate(_ascii("eos.compo", data), start=1):
-        tokens = line.split()
-        if not tokens:
-            continue
-        try:
-            key = (int(tokens[0]), int(tokens[1]), int(tokens[2]))
-            phase = int(tokens[3])
-            pair_count = int(tokens[4])
-            if pair_count < 0:
-                raise ValueError
-            cursor = 5 + 2 * pair_count
-            quadruple_count = int(tokens[cursor])
-            if quadruple_count < 0 or len(tokens) != cursor + 1 + 4 * quadruple_count:
-                raise ValueError
-            for pair_index in range(pair_count):
-                int(tokens[5 + 2 * pair_index])
-                if not np.isfinite(float(tokens[6 + 2 * pair_index])):
-                    raise ValueError
-            for quadruple_index in range(quadruple_count):
-                start = cursor + 1 + 4 * quadruple_index
-                int(tokens[start])
-                for value in tokens[start + 1 : start + 4]:
-                    if not np.isfinite(float(value)):
-                        raise ValueError
-        except (IndexError, ValueError) as exc:
-            raise EosInputError(
-                f"CompOSE eos.compo line {line_number} is malformed"
-            ) from exc
-        if key not in allowed:
-            raise EosInputError(
-                f"CompOSE eos.compo line {line_number} has an out-of-grid index"
-            )
-        mapping[key] = phase
-    return tuple(mapping.get(key) for key in expected_keys)
-
-
-class ComposeEos(TabulatedEos):
-    """Continuous cold 1D CompOSE table normalized to the common adapter."""
+    surface_boundary_kind = "finite_source_pressure_not_vacuum"
+    tidal_capability_status = "unavailable_positive_pressure_source_boundary"
+    preferred_stellar_integration_variable = "log_pressure"
 
     def __init__(
         self,
         *,
-        phase_codes: tuple[int | None, ...] | None,
-        baryon_chemical_potential_mev: np.ndarray,
-        compose_metadata: dict[str, Any],
-        **kwargs: Any,
+        cold_slice: ComposeColdSlice,
+        source_slice_report: ComposeSliceReport,
+        selection: dict[str, Any],
     ) -> None:
-        super().__init__(source_metadata={"compose": compose_metadata}, **kwargs)
+        report = cold_slice.report()
+        if not report.continuous_barotrope_available:
+            raise EosInputError(
+                "selected CompOSE rows do not form one continuous invertible barotrope; "
+                "inspect the dataset report and choose an explicit monotone source block "
+                "or provide a future transition policy"
+            )
+        density = np.asarray(cold_slice.baryon_density_fm3, dtype=float)
+        pressure = np.asarray(cold_slice.pressure_mev_fm3, dtype=float)
+        epsilon = np.asarray(cold_slice.energy_density_mev_fm3, dtype=float)
         chemical_potential = np.asarray(
-            baryon_chemical_potential_mev, dtype=float
+            cold_slice.baryon_chemical_potential_mev, dtype=float
         )
+        if len(density) < 4:
+            raise EosInputError("continuous CompOSE barotrope requires at least four rows")
         if (
-            chemical_potential.shape != self._energy_density_mev_fm3.shape
-            or not np.all(np.isfinite(chemical_potential))
-            or np.any(chemical_potential <= 0.0)
+            np.any(density <= 0.0)
+            or np.any(pressure <= 0.0)
+            or np.any(epsilon <= 0.0)
+            or np.any(np.diff(density) <= 0.0)
+            or np.any(np.diff(pressure) <= 0.0)
+            or np.any(np.diff(epsilon) <= 0.0)
         ):
             raise EosInputError(
-                "CompOSE baryon chemical potential must be finite, positive, and row-aligned"
+                "continuous CompOSE barotrope requires positive strictly increasing "
+                "nB, pressure, and total energy density"
             )
-        if phase_codes is not None and len(phase_codes) != len(chemical_potential):
-            raise EosInputError("CompOSE phase codes must align with retained rows")
-        self.phase_codes = phase_codes
-        self._baryon_chemical_potential_mev = chemical_potential.copy()
-        self._baryon_chemical_potential_mev.setflags(write=False)
-        self._compose_metadata = copy.deepcopy(compose_metadata)
+        self.model_name = cold_slice.dataset.model_id
+        self.source = cold_slice.dataset.source_url
+        self.energy_density_convention = CANONICAL_ENERGY_DENSITY_CONVENTION
+        self._cold_slice = cold_slice
+        self._source_slice_report = source_slice_report
+        self._slice_report = report
+        self._selection = copy.deepcopy(selection)
+        self._density = density.copy()
+        self._pressure = pressure.copy()
+        self._epsilon = epsilon.copy()
+        self._chemical_potential = chemical_potential.copy()
+        for array in (
+            self._density,
+            self._pressure,
+            self._epsilon,
+            self._chemical_potential,
+        ):
+            array.setflags(write=False)
+        self.energy_density_min_mev_fm3 = float(epsilon[0])
+        self.energy_density_max_mev_fm3 = float(epsilon[-1])
+        self.pressure_min_mev_fm3 = float(pressure[0])
+        self.pressure_max_mev_fm3 = float(pressure[-1])
+        self._log_density = np.log(density)
+        self._log_pressure = np.log(pressure)
+        self._log_epsilon = np.log(epsilon)
+        self._pressure_from_density = PchipInterpolator(
+            self._log_density, self._log_pressure, extrapolate=False
+        )
+        self._epsilon_from_density = PchipInterpolator(
+            self._log_density, self._log_epsilon, extrapolate=False
+        )
+        self._dlog_pressure = self._pressure_from_density.derivative()
+        self._dlog_epsilon = self._epsilon_from_density.derivative()
+
+    @property
+    def baryon_density_fm3(self) -> np.ndarray:
+        return _readonly(self._density)
+
+    @property
+    def pressure_mev_fm3(self) -> np.ndarray:
+        return _readonly(self._pressure)
+
+    @property
+    def energy_density_mev_fm3(self) -> np.ndarray:
+        return _readonly(self._epsilon)
 
     @property
     def baryon_chemical_potential_mev(self) -> np.ndarray:
-        return self._readonly_view(self._baryon_chemical_potential_mev)
+        return _readonly(self._chemical_potential)
+
+    @property
+    def phase_codes(self) -> tuple[int | None, ...] | None:
+        return self._cold_slice.phase_codes
 
     @property
     def compose_metadata(self) -> dict[str, Any]:
-        return copy.deepcopy(self._compose_metadata)
+        return self.provenance()["compose"]
+
+    @property
+    def slice_report(self) -> ComposeSliceReport:
+        return self._slice_report
+
+    def _density_log_from_value(
+        self,
+        values: np.ndarray,
+        *,
+        nodes: np.ndarray,
+        interpolant: PchipInterpolator,
+        lower_value: float,
+        upper_value: float,
+    ) -> np.ndarray:
+        result = np.empty_like(values, dtype=float)
+        flattened = result.reshape(-1)
+        for output_index, value in enumerate(values.reshape(-1)):
+            candidate = float(value)
+            if candidate == lower_value:
+                flattened[output_index] = self._log_density[0]
+                continue
+            if candidate == upper_value:
+                flattened[output_index] = self._log_density[-1]
+                continue
+            interval = int(np.searchsorted(nodes, candidate, side="right") - 1)
+            interval = min(max(interval, 0), len(nodes) - 2)
+            target = math.log(candidate)
+            flattened[output_index] = brentq(
+                lambda log_density: float(interpolant(log_density) - target),
+                float(self._log_density[interval]),
+                float(self._log_density[interval + 1]),
+                xtol=5.0e-15,
+                rtol=4.0 * np.finfo(float).eps,
+            )
+        return result
+
+    def _log_density_from_pressure(self, pressure: np.ndarray) -> np.ndarray:
+        return self._density_log_from_value(
+            pressure,
+            nodes=self._pressure,
+            interpolant=self._pressure_from_density,
+            lower_value=self.pressure_min_mev_fm3,
+            upper_value=self.pressure_max_mev_fm3,
+        )
+
+    def _log_density_from_epsilon(self, epsilon: np.ndarray) -> np.ndarray:
+        return self._density_log_from_value(
+            epsilon,
+            nodes=self._epsilon,
+            interpolant=self._epsilon_from_density,
+            lower_value=self.energy_density_min_mev_fm3,
+            upper_value=self.energy_density_max_mev_fm3,
+        )
+
+    def _cs2_from_log_density(self, log_density: np.ndarray) -> np.ndarray:
+        pressure = np.exp(self._pressure_from_density(log_density))
+        epsilon = np.exp(self._epsilon_from_density(log_density))
+        dlog_pressure = np.asarray(self._dlog_pressure(log_density), dtype=float)
+        dlog_epsilon = np.asarray(self._dlog_epsilon(log_density), dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return pressure * dlog_pressure / (epsilon * dlog_epsilon)
+
+    def pressure_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+        values, scalar = _domain_values(
+            energy_density_mev_fm3,
+            name="energy_density_mev_fm3",
+            lower=self.energy_density_min_mev_fm3,
+            upper=self.energy_density_max_mev_fm3,
+        )
+        log_density = self._log_density_from_epsilon(values)
+        result = np.exp(self._pressure_from_density(log_density))
+        result = np.where(values == self.energy_density_min_mev_fm3, self.pressure_min_mev_fm3, result)
+        result = np.where(values == self.energy_density_max_mev_fm3, self.pressure_max_mev_fm3, result)
+        if not np.all(np.isfinite(result)):
+            raise EosDomainError("CompOSE interpolation left the selected density domain")
+        return _scalar_or_array(result, scalar)
+
+    def energy_density_from_pressure(self, pressure_mev_fm3: Any) -> Any:
+        values, scalar = _domain_values(
+            pressure_mev_fm3,
+            name="pressure_mev_fm3",
+            lower=self.pressure_min_mev_fm3,
+            upper=self.pressure_max_mev_fm3,
+        )
+        log_density = self._log_density_from_pressure(values)
+        result = np.exp(self._epsilon_from_density(log_density))
+        result = np.where(values == self.pressure_min_mev_fm3, self.energy_density_min_mev_fm3, result)
+        result = np.where(values == self.pressure_max_mev_fm3, self.energy_density_max_mev_fm3, result)
+        if not np.all(np.isfinite(result)):
+            raise EosDomainError("CompOSE interpolation left the selected pressure domain")
+        return _scalar_or_array(result, scalar)
+
+    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+        values, scalar = _domain_values(
+            energy_density_mev_fm3,
+            name="energy_density_mev_fm3",
+            lower=self.energy_density_min_mev_fm3,
+            upper=self.energy_density_max_mev_fm3,
+        )
+        result = self._cs2_from_log_density(self._log_density_from_epsilon(values))
+        if not np.all(np.isfinite(result)):
+            raise EosInputError("CompOSE sound-speed derivative is nonfinite")
+        return _scalar_or_array(result, scalar)
+
+    def __call__(self, pressure_mev_fm3: float) -> tuple[float, float]:
+        values, _scalar = _domain_values(
+            pressure_mev_fm3,
+            name="pressure_mev_fm3",
+            lower=self.pressure_min_mev_fm3,
+            upper=self.pressure_max_mev_fm3,
+        )
+        log_density = self._log_density_from_pressure(values)
+        epsilon = float(np.exp(self._epsilon_from_density(log_density)))
+        cs2 = float(self._cs2_from_log_density(log_density))
+        return epsilon, cs2
+
+    def _validation_log_density(self, points: int) -> np.ndarray:
+        intervals = len(self._log_density) - 1
+        points_per_interval = max(9, int(np.ceil((int(points) - 1) / intervals)))
+        candidates: list[float] = []
+        pressure_coefficients = self._pressure_from_density.c
+        epsilon_coefficients = self._epsilon_from_density.c
+        for index in range(intervals):
+            left = float(self._log_density[index])
+            right = float(self._log_density[index + 1])
+            width = right - left
+            candidates.extend(
+                float(value)
+                for value in np.linspace(left, right, points_per_interval, endpoint=False)
+            )
+            fp_cubic, fp_quadratic, fp_linear, fp_constant = pressure_coefficients[:, index]
+            ep_cubic, ep_quadratic, ep_linear, ep_constant = epsilon_coefficients[:, index]
+            log_pressure = Polynomial(
+                (fp_constant, fp_linear, fp_quadratic, fp_cubic)
+            )
+            log_epsilon = Polynomial(
+                (ep_constant, ep_linear, ep_quadratic, ep_cubic)
+            )
+            pressure_derivative = log_pressure.deriv()
+            epsilon_derivative = log_epsilon.deriv()
+            cs2_stationarity = (
+                (pressure_derivative - epsilon_derivative)
+                * pressure_derivative
+                * epsilon_derivative
+                + pressure_derivative.deriv() * epsilon_derivative
+                - epsilon_derivative.deriv() * pressure_derivative
+            )
+            endpoint_tolerance = 64.0 * np.finfo(float).eps * max(
+                1.0, abs(left), abs(right), width
+            )
+            for polynomial in (
+                pressure_derivative,
+                epsilon_derivative,
+                cs2_stationarity,
+            ):
+                for root in polynomial.roots():
+                    if abs(float(np.imag(root))) > 1.0e-10:
+                        continue
+                    local = float(np.real(root))
+                    if -endpoint_tolerance <= local <= width + endpoint_tolerance:
+                        if abs(local) <= endpoint_tolerance:
+                            candidates.append(left)
+                        elif abs(local - width) <= endpoint_tolerance:
+                            candidates.append(right)
+                        else:
+                            candidates.append(left + local)
+        candidates.append(float(self._log_density[-1]))
+        return np.unique(np.asarray(candidates, dtype=float))
+
+    def validate(self, *, points: int = 2049) -> EosValidationReport:
+        if int(points) < 17:
+            raise ValueError("validation points must be at least 17")
+        log_density = self._validation_log_density(int(points))
+        pressure = np.exp(self._pressure_from_density(log_density))
+        epsilon = np.exp(self._epsilon_from_density(log_density))
+        cs2 = self._cs2_from_log_density(log_density)
+        issues: list[EosValidationIssue] = []
+        if np.any(~np.isfinite(pressure)) or np.any(~np.isfinite(epsilon)) or np.any(~np.isfinite(cs2)):
+            issues.append(EosValidationIssue("nonfinite", "interpolated pressure, energy density, or cs2 is nonfinite"))
+        if np.any(pressure <= 0.0) or np.any(epsilon <= 0.0):
+            issues.append(EosValidationIssue("nonpositive_thermodynamics", "pressure and total energy density must remain positive"))
+        if np.any(np.diff(pressure) <= 0.0) or np.any(np.diff(epsilon) <= 0.0):
+            issues.append(EosValidationIssue("nonmonotone_native_interpolation", "native-density interpolation must remain strictly invertible"))
+        if np.any(cs2 <= 0.0):
+            issues.append(EosValidationIssue("mechanical_instability", "dP/dE must remain positive"))
+        if np.any(cs2 > 1.0):
+            issues.append(EosValidationIssue("acausal", "dP/dE must not exceed one"))
+        return EosValidationReport(
+            model_name=self.model_name,
+            assessed_points=len(log_density),
+            pressure_min_mev_fm3=float(np.min(pressure)),
+            pressure_max_mev_fm3=float(np.max(pressure)),
+            energy_density_min_mev_fm3=float(np.min(epsilon)),
+            energy_density_max_mev_fm3=float(np.max(epsilon)),
+            cs2_min=float(np.min(cs2)),
+            cs2_max=float(np.max(cs2)),
+            issues=tuple(issues),
+        )
+
+    def provenance(self) -> dict[str, Any]:
+        dataset = self._cold_slice.dataset
+        return {
+            "schema_version": EOS_INPUT_SCHEMA_VERSION,
+            "adapter": COMPOSE_BAROTROPE_SCHEMA_VERSION,
+            "model_name": self.model_name,
+            "source": self.source,
+            "units": CANONICAL_UNITS,
+            "energy_density_convention": self.energy_density_convention,
+            "rows": len(self._density),
+            "interpolation": COMPOSE_INTERPOLATION_POLICY,
+            "interpolation_authority": "toolkit_declared_not_source_supplied",
+            "extrapolation": "forbidden",
+            "discontinuous_barotropes": "require_explicit_future_transition_policy",
+            "selection": copy.deepcopy(self._selection),
+            "domain": {
+                "baryon_density_min_fm3": float(self._density[0]),
+                "baryon_density_max_fm3": float(self._density[-1]),
+                "energy_density_min_MeV_fm3": self.energy_density_min_mev_fm3,
+                "energy_density_max_MeV_fm3": self.energy_density_max_mev_fm3,
+                "pressure_min_MeV_fm3": self.pressure_min_mev_fm3,
+                "pressure_max_MeV_fm3": self.pressure_max_mev_fm3,
+            },
+            "validation_policy": {
+                "coordinate": "native_baryon_density",
+                "interval_samples_minimum": 9,
+                "bounded_cs2_extrema_search": True,
+                "claim": "numerically_assessed_interpolant_not_analytical_proof",
+            },
+            "stellar_surface": {
+                "kind": self.surface_boundary_kind,
+                "pressure_MeV_fm3": self.pressure_min_mev_fm3,
+                "tidal_capability": self.tidal_capability_status,
+            },
+            "compose": {
+                "dataset": dataset.provenance(),
+                "slice_report": self._slice_report.to_dict(),
+                "source_diagnostics_are_acceptance_gates": False,
+                "cold_euler_closure_relative_diagnostic_tolerance": COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
+                "cold_condition_absolute_diagnostic_tolerance": COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
+                "parser_version": COMPOSE_DATASET_SCHEMA_VERSION,
+                "format_authority": COMPOSE_FORMAT_AUTHORITY,
+                "model_id": dataset.model_id,
+                "source_url": dataset.source_url,
+                "matter_declaration": self._cold_slice.matter_declaration,
+                "includes_leptons": True,
+                "lepton_indicator_Il": dataset.lepton_indicator,
+                "source_rows": len(dataset.baryon_density.values),
+                "retained_rows": len(self._density),
+                "thermodynamic_duplicate_indices_last_row_wins": dataset.thermodynamic_duplicate_indices,
+                "phase_codes_available": self.phase_codes is not None,
+                "phase_code_rows_missing": self._slice_report.missing_phase_codes,
+                "phase_code_changes": self._slice_report.phase_code_changes,
+                "phase_codes_interpreted_as_discontinuities": False,
+                "cold_euler_closure_source_maximum_normalized_residual": self._source_slice_report.euler_maximum_normalized_residual,
+                "cold_euler_closure_retained_maximum_normalized_residual": self._slice_report.euler_maximum_normalized_residual,
+                "beta_equilibrium_Q5_source_maximum_absolute_residual": self._source_slice_report.q5_maximum_absolute_residual,
+                "beta_equilibrium_Q5_retained_maximum_absolute_residual": self._slice_report.q5_maximum_absolute_residual,
+                "zero_temperature_Q6_minus_Q7_source_maximum_absolute_residual": self._source_slice_report.q6_minus_q7_maximum_absolute_residual,
+                "zero_temperature_Q6_minus_Q7_retained_maximum_absolute_residual": self._slice_report.q6_minus_q7_maximum_absolute_residual,
+            },
+        }
+
+
+def build_compose_eos(
+    dataset_or_slice: ComposeDataset | ComposeColdSlice,
+    *,
+    matter: str = "cold_beta_equilibrated",
+    includes_leptons: bool = True,
+    baryon_density_min_fm3: float | None = None,
+    baryon_density_max_fm3: float | None = None,
+    ordering_policy: str = "strict",
+) -> ComposeEos:
+    """Construct one explicitly selected continuous CompOSE barotrope.
+
+    ``strict`` preserves the historical fail-closed behavior.  The explicit
+    The diagnostic policies remove no ambiguity silently: they keep source
+    values unchanged, choose the earlier or later member of a local ordering
+    conflict, and record every omitted source position in provenance. Their
+    separation is a sensitivity measure, not a physical seam/transition model.
+    """
+
+    if isinstance(dataset_or_slice, ComposeDataset):
+        cold_slice = dataset_or_slice.cold_beta_equilibrium_slice(
+            matter=matter,
+            includes_leptons=includes_leptons,
+        )
+    elif isinstance(dataset_or_slice, ComposeColdSlice):
+        cold_slice = dataset_or_slice
+    else:
+        raise TypeError("build_compose_eos expects ComposeDataset or ComposeColdSlice")
+    if ordering_policy not in COMPOSE_ORDERING_POLICIES:
+        raise EosInputError(
+            f"ordering_policy must be one of {COMPOSE_ORDERING_POLICIES}"
+        )
+    source_slice_report = cold_slice.report()
+    selected_source = cold_slice.selected_domain(
+        baryon_density_min_fm3=baryon_density_min_fm3,
+        baryon_density_max_fm3=baryon_density_max_fm3,
+    )
+    selected = selected_source
+    if ordering_policy == "diagnostic_monotone_subsequence":
+        selected = selected_source.diagnostic_monotone_subsequence(
+            conflict_policy="keep_first"
+        )
+    elif ordering_policy == "diagnostic_keep_later_monotone_subsequence":
+        selected = selected_source.diagnostic_monotone_subsequence(
+            conflict_policy="keep_later"
+        )
+    retained_positions = set(selected.source_positions)
+    omitted_positions = tuple(
+        position
+        for position in selected_source.source_positions
+        if position not in retained_positions
+    )
+    return ComposeEos(
+        cold_slice=selected,
+        source_slice_report=source_slice_report,
+        selection={
+            "requested_baryon_density_min_fm3": baryon_density_min_fm3,
+            "requested_baryon_density_max_fm3": baryon_density_max_fm3,
+            "last_retained_source_node_fm3": float(selected.baryon_density_fm3[-1]),
+            "ordering_policy": ordering_policy,
+            "selected_source_rows_before_ordering_policy": len(selected_source.rows),
+            "retained_source_positions": list(selected.source_positions),
+            "omitted_source_positions": list(omitted_positions),
+            "omitted_source_rows": len(omitted_positions),
+            "diagnostic_reduction_is_physical_transition_policy": False,
+        },
+    )
 
 
 def load_compose_eos(
@@ -273,211 +491,38 @@ def load_compose_eos(
     source_url: str,
     matter: str,
     includes_leptons: bool,
+    baryon_density_min_fm3: float | None = None,
     baryon_density_max_fm3: float | None = None,
+    ordering_policy: str = "strict",
 ) -> ComposeEos:
-    """Read a declared cold beta-equilibrated continuous CompOSE table.
+    """Compatibility wrapper: parse a dataset, then build a continuous barotrope."""
 
-    CompOSE's file format alone cannot prove the physical matter choice.
-    Therefore the caller must explicitly supply the catalogue model identity,
-    source URL, beta-equilibrium declaration, and lepton inclusion.
-    """
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise EosInputError("CompOSE model_id must be non-empty")
-    if not isinstance(source_url, str) or not source_url.strip():
-        raise EosInputError("CompOSE source_url must be non-empty")
     if matter != "cold_beta_equilibrated":
-        raise EosInputError("v1 supports only explicitly declared cold beta-equilibrated matter")
+        raise EosInputError(
+            "v2 stellar CompOSE input must explicitly be cold beta-equilibrated matter"
+        )
     if includes_leptons is not True:
-        raise EosInputError("v1 stellar CompOSE input must explicitly include leptons")
-
-    files, bundle_identity = _read_bundle(path_or_zip)
-    temperature = _parse_axis("eos.t", files["eos.t"])
-    density = _parse_axis("eos.nb", files["eos.nb"])
-    charge = _parse_axis("eos.yq", files["eos.yq"])
-    if len(temperature.values) != 1 or float(temperature.values[0]) != 0.0:
-        raise EosInputError("v1 requires exactly one T=0 CompOSE slice")
-    if len(charge.values) != 1:
-        raise EosInputError("v1 requires exactly one charge-fraction grid point")
-
-    (
-        neutron_mass,
-        proton_mass,
-        lepton_indicator,
-        rows,
-        duplicate_count,
-    ) = _parse_thermodynamics(
-        files["eos.thermo"],
-        temperature=temperature,
-        density=density,
-        charge_fraction=charge,
-    )
-    if lepton_indicator != 1:
-        raise EosInputError(
-            "CompOSE eos.thermo declares that leptons are absent (Il != 1)"
-        )
-    t_index = temperature.indices[0]
-    y_index = charge.indices[0]
-    keys = tuple((t_index, n_index, y_index) for n_index in density.indices)
-    missing = [key for key in keys if key not in rows]
-    if missing:
-        raise EosInputError(
-            f"CompOSE thermodynamic path is incomplete: {len(missing)} rows missing"
-        )
-    q1 = np.asarray([rows[key][0] for key in keys], dtype=float)
-    q3 = np.asarray([rows[key][2] for key in keys], dtype=float)
-    q5 = np.asarray([rows[key][4] for key in keys], dtype=float)
-    q6 = np.asarray([rows[key][5] for key in keys], dtype=float)
-    q7 = np.asarray([rows[key][6] for key in keys], dtype=float)
-    pressure = density.values * q1
-    baryon_chemical_potential = neutron_mass * (1.0 + q3)
-    total_energy_density = density.values * neutron_mass * (1.0 + q7)
-    euler_residual = pressure - (
-        density.values * baryon_chemical_potential - total_energy_density
-    )
-    euler_scale = np.maximum.reduce(
-        (
-            np.abs(pressure),
-            np.abs(density.values * baryon_chemical_potential),
-            np.abs(total_energy_density),
-        )
-    )
-    if np.any(~np.isfinite(euler_scale)) or np.any(euler_scale <= 0.0):
-        raise EosInputError("CompOSE rows have a nonpositive cold-Euler normalization")
-    normalized_euler_residual = np.abs(euler_residual) / euler_scale
-    source_maximum_euler_residual = float(np.max(normalized_euler_residual))
-    beta_equilibrium_residual = np.abs(q5)
-    cold_free_energy_residual = np.abs(q6 - q7)
-    source_maximum_beta_residual = float(np.max(beta_equilibrium_residual))
-    source_maximum_cold_free_energy_residual = float(
-        np.max(cold_free_energy_residual)
-    )
-    phase_codes = _parse_phase_codes(files.get("eos.compo"), expected_keys=keys)
-    retained = np.ones(len(density.values), dtype=bool)
-    declared_upper_density = None
-    if baryon_density_max_fm3 is not None:
-        declared_upper_density = float(baryon_density_max_fm3)
-        if not np.isfinite(declared_upper_density) or declared_upper_density <= 0.0:
-            raise EosInputError("baryon_density_max_fm3 must be finite and positive")
-        retained = density.values <= declared_upper_density
-        if int(np.count_nonzero(retained)) < 4:
-            raise EosInputError("declared CompOSE density limit retains fewer than four rows")
-        density_values = density.values[retained]
-        pressure = pressure[retained]
-        total_energy_density = total_energy_density[retained]
-        baryon_chemical_potential = baryon_chemical_potential[retained]
-        if phase_codes is not None:
-            phase_codes = tuple(value for value, keep in zip(phase_codes, retained) if keep)
-    else:
-        density_values = density.values
-    retained_maximum_euler_residual = float(np.max(normalized_euler_residual[retained]))
-    retained_maximum_beta_residual = float(
-        np.max(beta_equilibrium_residual[retained])
-    )
-    retained_maximum_cold_free_energy_residual = float(
-        np.max(cold_free_energy_residual[retained])
-    )
-    if (
-        retained_maximum_euler_residual
-        > COMPOSE_EULER_CLOSURE_RELATIVE_TOLERANCE
-    ):
-        raise EosInputError(
-            "retained CompOSE rows fail cold Euler closure: "
-            f"maximum normalized residual {retained_maximum_euler_residual:.12g} "
-            f"exceeds {COMPOSE_EULER_CLOSURE_RELATIVE_TOLERANCE:.12g}"
-        )
-    if retained_maximum_beta_residual > COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE:
-        raise EosInputError(
-            "retained CompOSE rows fail the beta-equilibrium condition Q5 = 0: "
-            f"maximum absolute residual {retained_maximum_beta_residual:.12g} "
-            f"exceeds {COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE:.12g}"
-        )
-    if (
-        retained_maximum_cold_free_energy_residual
-        > COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE
-    ):
-        raise EosInputError(
-            "retained CompOSE rows fail the T=0 identity Q6 = Q7: "
-            "maximum absolute residual "
-            f"{retained_maximum_cold_free_energy_residual:.12g} exceeds "
-            f"{COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE:.12g}"
-        )
-    phase_changes = 0
-    missing_phase_codes = 0
-    if phase_codes is not None:
-        missing_phase_codes = sum(value is None for value in phase_codes)
-        phase_changes = sum(
-            left is not None and right is not None and left != right
-            for left, right in zip(phase_codes, phase_codes[1:])
-        )
-
-    compose_metadata = {
-        "parser_version": COMPOSE_PARSER_VERSION,
-        "format_authority": COMPOSE_FORMAT_AUTHORITY,
-        "model_id": model_id.strip(),
-        "source_url": source_url.strip(),
-        "matter_declaration": matter,
-        "includes_leptons": True,
-        "temperature_MeV": float(temperature.values[0]),
-        "charge_fraction_grid_value": float(charge.values[0]),
-        "neutron_mass_MeV": float(neutron_mass),
-        "proton_mass_MeV": float(proton_mass),
-        "lepton_indicator_Il": int(lepton_indicator),
-        "cold_euler_closure_relative_tolerance": COMPOSE_EULER_CLOSURE_RELATIVE_TOLERANCE,
-        "cold_euler_closure_source_maximum_normalized_residual": (
-            source_maximum_euler_residual
-        ),
-        "cold_euler_closure_retained_maximum_normalized_residual": (
-            retained_maximum_euler_residual
-        ),
-        "cold_condition_absolute_tolerance": COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE,
-        "beta_equilibrium_Q5_source_maximum_absolute_residual": (
-            source_maximum_beta_residual
-        ),
-        "beta_equilibrium_Q5_retained_maximum_absolute_residual": (
-            retained_maximum_beta_residual
-        ),
-        "zero_temperature_Q6_minus_Q7_source_maximum_absolute_residual": (
-            source_maximum_cold_free_energy_residual
-        ),
-        "zero_temperature_Q6_minus_Q7_retained_maximum_absolute_residual": (
-            retained_maximum_cold_free_energy_residual
-        ),
-        "thermodynamic_duplicate_indices_last_row_wins": duplicate_count,
-        "phase_codes_available": phase_codes is not None,
-        "phase_code_rows_missing": missing_phase_codes,
-        "phase_code_changes": phase_changes,
-        "phase_codes_interpreted_as_discontinuities": False,
-        "source_rows": int(len(density.values)),
-        "retained_rows": int(np.count_nonzero(retained)),
-        "source_baryon_density_min_fm3": float(density.values[0]),
-        "source_baryon_density_max_fm3": float(density.values[-1]),
-        "retained_baryon_density_min_fm3": float(density_values[0]),
-        "retained_baryon_density_max_fm3": float(density_values[-1]),
-        "explicit_baryon_density_max_fm3": declared_upper_density,
-        "domain_selection": (
-            "complete_source_table"
-            if declared_upper_density is None
-            else "explicit_user_declared_upper_density_no_root_inference"
-        ),
-        "bundle": bundle_identity,
-    }
-    return ComposeEos(
-        name=model_id.strip(),
-        energy_density_mev_fm3=total_energy_density,
-        pressure_mev_fm3=pressure,
-        baryon_density_fm3=density_values,
-        source=source_url.strip(),
-        phase_codes=phase_codes,
-        baryon_chemical_potential_mev=baryon_chemical_potential,
-        compose_metadata=compose_metadata,
+        raise EosInputError("v2 stellar CompOSE input must explicitly include leptons")
+    dataset = load_compose_dataset(path_or_zip, model_id=model_id, source_url=source_url)
+    return build_compose_eos(
+        dataset,
+        matter=matter,
+        includes_leptons=includes_leptons,
+        baryon_density_min_fm3=baryon_density_min_fm3,
+        baryon_density_max_fm3=baryon_density_max_fm3,
+        ordering_policy=ordering_policy,
     )
 
 
 __all__ = [
-    "COMPOSE_FORMAT_AUTHORITY",
-    "COMPOSE_COLD_CONDITION_ABSOLUTE_TOLERANCE",
-    "COMPOSE_EULER_CLOSURE_RELATIVE_TOLERANCE",
-    "COMPOSE_PARSER_VERSION",
+    "COMPOSE_BAROTROPE_SCHEMA_VERSION",
+    "COMPOSE_INTERPOLATION_POLICY",
+    "COMPOSE_ORDERING_POLICIES",
+    "ComposeColdSlice",
+    "ComposeDataset",
     "ComposeEos",
+    "ComposeSliceReport",
+    "build_compose_eos",
+    "load_compose_dataset",
     "load_compose_eos",
 ]

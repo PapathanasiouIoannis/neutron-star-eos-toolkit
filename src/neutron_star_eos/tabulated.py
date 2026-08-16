@@ -31,6 +31,57 @@ from neutron_star_eos.eos import (
 TABULATED_INTERPOLATION_POLICY = "log_log_pchip_v1"
 
 
+def _deduplicate_derived_validation_grid(values: Any) -> np.ndarray:
+    """Collapse only ULP-near points introduced by validation arithmetic.
+
+    Source table nodes are validated separately and are never passed through
+    this helper.  Critical points are found in log space and then exponentiated;
+    a root that is mathematically an interval endpoint can consequently differ
+    from that endpoint by a handful of floating-point ULPs.  Keeping both points
+    creates a meaningless pressure-ordering comparison at effectively the same
+    energy density.
+    """
+
+    ordered = np.sort(np.asarray(values, dtype=float))
+    if ordered.ndim != 1 or not np.all(np.isfinite(ordered)):
+        raise ValueError("derived validation grid must be finite and one-dimensional")
+    retained: list[float] = []
+    relative_tolerance = 16.0 * np.finfo(float).eps
+    for raw_value in ordered:
+        value = float(raw_value)
+        if retained and math.isclose(
+            value,
+            retained[-1],
+            rel_tol=relative_tolerance,
+            abs_tol=0.0,
+        ):
+            continue
+        retained.append(value)
+    return np.asarray(retained, dtype=float)
+
+
+def _validation_grid_with_exact_endpoints(
+    interior_values: Any,
+    *,
+    lower: float,
+    upper: float,
+) -> np.ndarray:
+    grid = _deduplicate_derived_validation_grid(
+        np.concatenate(
+            (
+                np.asarray([lower], dtype=float),
+                np.asarray(interior_values, dtype=float),
+                np.asarray([upper], dtype=float),
+            )
+        )
+    )
+    grid[0] = lower
+    grid[-1] = upper
+    if np.any(np.diff(grid) <= 0.0):
+        raise ValueError("derived validation grid could not preserve exact endpoints")
+    return grid
+
+
 def _one_dimensional(name: str, values: Any) -> np.ndarray:
     try:
         array = np.asarray(values, dtype=float)
@@ -272,18 +323,14 @@ class TabulatedEos:
             )
         )
         raw_validation_grid = np.exp(validation_logs)
-        interior_grid = np.unique(
-            raw_validation_grid[
-                (raw_validation_grid > self.energy_density_min_mev_fm3)
-                & (raw_validation_grid < self.energy_density_max_mev_fm3)
-            ]
-        )
-        validation_grid = np.concatenate(
-            (
-                np.asarray([self.energy_density_min_mev_fm3], dtype=float),
-                interior_grid,
-                np.asarray([self.energy_density_max_mev_fm3], dtype=float),
-            )
+        interior_grid = raw_validation_grid[
+            (raw_validation_grid > self.energy_density_min_mev_fm3)
+            & (raw_validation_grid < self.energy_density_max_mev_fm3)
+        ]
+        validation_grid = _validation_grid_with_exact_endpoints(
+            interior_grid,
+            lower=self.energy_density_min_mev_fm3,
+            upper=self.energy_density_max_mev_fm3,
         )
         return _validate_eos_grid(self, validation_grid)
 

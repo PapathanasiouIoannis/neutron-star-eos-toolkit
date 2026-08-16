@@ -8,6 +8,8 @@ use them.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -22,6 +24,8 @@ ANALYTICAL_DERIVATIVE_RELATIVE_TOLERANCE = 2.0e-4
 ANALYTICAL_DERIVATIVE_ABSOLUTE_TOLERANCE = 2.0e-6
 ANALYTICAL_INVERSE_RELATIVE_TOLERANCE = 2.0e-8
 ANALYTICAL_INVERSE_ABSOLUTE_TOLERANCE = 2.0e-10
+ANALYTICAL_FINGERPRINT_GRID_POINTS = 2049
+ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS = 129
 
 
 class EosInputError(ValueError):
@@ -30,6 +34,19 @@ class EosInputError(ValueError):
 
 class EosDomainError(EosInputError):
     """Raised when an EoS is evaluated outside its declared domain."""
+
+
+def _eos_provenance_sha256(eos: "ColdBarotrope") -> str:
+    """Return one canonical identity for the exact declared EoS adapter."""
+
+    encoded = json.dumps(
+        eos.provenance(),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +370,37 @@ class AnalyticalEos:
         return replace(report, issues=tuple(issues))
 
     def provenance(self) -> dict[str, Any]:
+        epsilon = np.geomspace(
+            self.energy_density_min_mev_fm3,
+            self.energy_density_max_mev_fm3,
+            ANALYTICAL_FINGERPRINT_GRID_POINTS,
+        )
+        pressure = np.asarray(self.pressure_from_energy_density(epsilon), dtype=float)
+        cs2 = np.asarray(
+            self.sound_speed_squared_from_energy_density(epsilon), dtype=float
+        )
+        inverse_indices = np.linspace(
+            0,
+            len(epsilon) - 1,
+            ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS,
+            dtype=int,
+        )
+        inverse_pressure = pressure[inverse_indices]
+        recovered_epsilon = np.asarray(
+            self.energy_density_from_pressure(inverse_pressure), dtype=float
+        )
+        fingerprint = hashlib.sha256()
+        for name, values in (
+            ("energy_density_mev_fm3", epsilon),
+            ("pressure_mev_fm3", pressure),
+            ("sound_speed_squared", cs2),
+            ("inverse_pressure_mev_fm3", inverse_pressure),
+            ("recovered_energy_density_mev_fm3", recovered_epsilon),
+        ):
+            fingerprint.update(name.encode("ascii") + b"\0")
+            fingerprint.update(
+                np.ascontiguousarray(values, dtype="<f8").tobytes(order="C")
+            )
         return {
             "schema_version": EOS_INPUT_SCHEMA_VERSION,
             "adapter": "analytical_eos_v1",
@@ -367,6 +415,16 @@ class AnalyticalEos:
                 "pressure_max_MeV_fm3": self.pressure_max_mev_fm3,
             },
             "extrapolation": "forbidden",
+            "callable_fingerprint": {
+                "policy": "float64_le_sha256_forward_and_inverse_behavior_v2",
+                "forward_grid_points": ANALYTICAL_FINGERPRINT_GRID_POINTS,
+                "inverse_grid_points": ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS,
+                "inverse_pressure_grid": (
+                    "forward-curve pressures at evenly spaced forward-grid indices"
+                ),
+                "sha256": fingerprint.hexdigest(),
+                "scope": "evaluated callable behavior, not source-code identity",
+            },
             "validation_policy": {
                 "analytical_grid_points_default": 2049,
                 "derivative_relative_tolerance": ANALYTICAL_DERIVATIVE_RELATIVE_TOLERANCE,

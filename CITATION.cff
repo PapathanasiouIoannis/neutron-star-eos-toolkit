@@ -2,7 +2,9 @@ cff-version: 1.2.0
 message: If you use this software, cite the archived release associated with your results.
 title: Neutron-star EoS toolkit
 type: software
-version: 0.1.0
+version: 0.2.0
+repository-code: https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit
+url: https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit
 authors:
   - family-names: Papathanasiou
     given-names: Ioannis

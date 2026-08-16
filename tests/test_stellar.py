@@ -84,6 +84,25 @@ class StellarTests(unittest.TestCase):
         self.assertLess(errors[-1], 2.0e-8)
         self.assertLess(max(errors), 2.0e-8)
 
+    def test_log_pressure_and_radius_routes_agree_on_analytical_benchmark(self) -> None:
+        radius_eos = analytical_polytrope()
+        radius_result = solve_star(radius_eos, 100.0)
+        log_pressure_eos = analytical_polytrope()
+        log_pressure_eos.preferred_stellar_integration_variable = "log_pressure"
+        log_pressure_result = solve_star(log_pressure_eos, 100.0)
+        self.assertEqual(radius_result.integration_variable, "radius")
+        self.assertEqual(log_pressure_result.integration_variable, "log_pressure")
+        self.assertAlmostEqual(
+            log_pressure_result.mass_msun,
+            radius_result.mass_msun,
+            delta=2.0e-8,
+        )
+        self.assertAlmostEqual(
+            log_pressure_result.radius_km,
+            radius_result.radius_km,
+            delta=2.0e-8,
+        )
+
     def test_sequence_retains_every_requested_status(self) -> None:
         eos = analytical_polytrope()
         sequence = solve_sequence(eos, [50.0, 100.0, 150.0])

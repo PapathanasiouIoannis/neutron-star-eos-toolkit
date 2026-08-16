@@ -16,8 +16,14 @@ from neutron_star_eos import (
     EosDomainError,
     EosInputError,
     TabulatedEos,
+    build_compose_eos,
+    load_compose_dataset,
     load_compose_eos,
     load_csv_eos,
+)
+from neutron_star_eos.tabulated import (
+    _deduplicate_derived_validation_grid,
+    _validation_grid_with_exact_endpoints,
 )
 from neutron_star_eos.cli import main as eos_tool_main
 
@@ -46,6 +52,20 @@ def sampled_polytrope(points: int = 65) -> TabulatedEos:
 
 
 class EosInputTests(unittest.TestCase):
+    def test_derived_validation_grid_collapses_ulp_near_duplicates(self) -> None:
+        left = 9.307536220056526e-05
+        right = 9.307536220056534e-05
+        distinct = 1.0e-03
+        collapsed = _deduplicate_derived_validation_grid([distinct, right, left])
+        np.testing.assert_array_equal(collapsed, [left, distinct])
+        upper = 1607.1196094212467
+        grid = _validation_grid_with_exact_endpoints(
+            [right, distinct, 1607.1196094212464],
+            lower=left,
+            upper=upper,
+        )
+        np.testing.assert_array_equal(grid, [left, distinct, upper])
+
     def test_analytical_forward_inverse_validation_and_domain(self) -> None:
         eos = analytical_polytrope()
         epsilon = np.asarray([1.0, 10.0, 100.0, 400.0])
@@ -329,10 +349,19 @@ class EosInputTests(unittest.TestCase):
                 for name, content in files.items():
                     archive.writestr(f"model/{name}", content)
             before = sorted(Path(temporary).iterdir())
-            eos = load_compose_eos(
+            dataset = load_compose_dataset(
                 archive_path,
                 model_id="synthetic-compose-polytrope",
                 source_url="https://example.invalid/compose-test",
+            )
+            cold_slice = dataset.cold_beta_equilibrium_slice(
+                matter="cold_beta_equilibrated",
+                includes_leptons=True,
+            )
+            self.assertEqual(cold_slice.additional_values[0], (42.0,))
+            self.assertTrue(cold_slice.report().continuous_barotrope_available)
+            eos = build_compose_eos(
+                dataset,
                 matter="cold_beta_equilibrated",
                 includes_leptons=True,
             )
@@ -406,9 +435,14 @@ class EosInputTests(unittest.TestCase):
                     includes_leptons=True,
                 )
 
-            for label, token_index, replacement, message in (
-                ("not-beta-equilibrated", 7, "1e-4", "Q5 = 0"),
-                ("not-zero-temperature", 8, "1e-4", "Q6 = Q7"),
+            for label, token_index, replacement, diagnostic_code in (
+                ("beta-diagnostic", 7, "1e-4", "beta_equilibrium_Q5_residual"),
+                (
+                    "temperature-diagnostic",
+                    8,
+                    "1e-4",
+                    "zero_temperature_Q6_minus_Q7_residual",
+                ),
             ):
                 invalid_lines = thermo.splitlines()
                 invalid_tokens = invalid_lines[1].split()
@@ -420,14 +454,21 @@ class EosInputTests(unittest.TestCase):
                         if name == "eos.thermo":
                             content = "\n".join(invalid_lines) + "\n"
                         archive.writestr(f"model/{name}", content)
-                with self.assertRaisesRegex(EosInputError, message):
-                    load_compose_eos(
-                        invalid_archive,
-                        model_id=label,
-                        source_url="https://example.invalid/compose-test",
-                        matter="cold_beta_equilibrated",
-                        includes_leptons=True,
-                    )
+                diagnostic_dataset = load_compose_dataset(
+                    invalid_archive,
+                    model_id=label,
+                    source_url="https://example.invalid/compose-test",
+                )
+                diagnostic_slice = diagnostic_dataset.cold_beta_equilibrium_slice(
+                    matter="cold_beta_equilibrated",
+                    includes_leptons=True,
+                )
+                self.assertIn(
+                    diagnostic_code,
+                    {item.code for item in diagnostic_slice.report().diagnostics},
+                )
+                diagnostic_eos = build_compose_eos(diagnostic_slice)
+                self.assertTrue(diagnostic_eos.validate(points=257).passed)
 
     def test_compose_requires_explicit_physical_declarations(self) -> None:
         with self.assertRaisesRegex(EosInputError, "cold beta-equilibrated"):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neutron-star-eos-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Analytical, CSV, and CompOSE cold-EoS inputs with background TOV models"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -13,6 +13,10 @@ dependencies = [
   "numpy==1.26.4",
   "scipy==1.13.1",
 ]
+
+[project.urls]
+Repository = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit"
+Issues = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/issues"
 
 [project.scripts]
 eos-tool = "neutron_star_eos.cli:main"
