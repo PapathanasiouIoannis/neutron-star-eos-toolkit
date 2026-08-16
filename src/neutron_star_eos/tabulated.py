@@ -27,7 +27,6 @@ from neutron_star_eos.eos import (
     _validate_eos_grid,
 )
 
-
 TABULATED_INTERPOLATION_POLICY = "log_log_pchip_v1"
 
 
@@ -135,11 +134,17 @@ class TabulatedEos:
         epsilon = _one_dimensional("energy_density_mev_fm3", energy_density_mev_fm3)
         pressure = _one_dimensional("pressure_mev_fm3", pressure_mev_fm3)
         if epsilon.shape != pressure.shape:
-            raise EosInputError("energy-density and pressure columns must have equal length")
+            raise EosInputError(
+                "energy-density and pressure columns must have equal length"
+            )
         if np.any(epsilon <= 0.0) or np.any(pressure <= 0.0):
-            raise EosInputError("v1 tabulated energy density and pressure must be positive")
+            raise EosInputError(
+                "v1 tabulated energy density and pressure must be positive"
+            )
         if np.any(np.diff(epsilon) <= 0.0):
-            raise EosInputError("energy density must be supplied in strictly increasing order")
+            raise EosInputError(
+                "energy density must be supplied in strictly increasing order"
+            )
         if np.any(np.diff(pressure) <= 0.0):
             raise EosInputError(
                 "pressure must increase strictly; plateaus or jumps need explicit future support"
@@ -151,7 +156,9 @@ class TabulatedEos:
             if baryon_density.shape != epsilon.shape:
                 raise EosInputError("baryon-density column must match the table length")
             if np.any(baryon_density <= 0.0) or np.any(np.diff(baryon_density) <= 0.0):
-                raise EosInputError("baryon density must be positive and strictly increasing")
+                raise EosInputError(
+                    "baryon density must be positive and strictly increasing"
+                )
 
         self.model_name = name.strip()
         self.source = source.strip()
@@ -176,7 +183,9 @@ class TabulatedEos:
         self._log_pressure_from_log_epsilon = PchipInterpolator(
             log_epsilon, log_pressure, extrapolate=False
         )
-        self._dlog_pressure_dlog_epsilon = self._log_pressure_from_log_epsilon.derivative()
+        self._dlog_pressure_dlog_epsilon = (
+            self._log_pressure_from_log_epsilon.derivative()
+        )
 
     @staticmethod
     def _readonly_view(values: np.ndarray) -> np.ndarray:
@@ -221,7 +230,9 @@ class TabulatedEos:
             result,
         )
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("pressure interpolation left the declared table domain")
+            raise EosDomainError(
+                "pressure interpolation left the declared table domain"
+            )
         return _scalar_or_array(result, scalar)
 
     def energy_density_from_pressure(self, pressure_mev_fm3: Any) -> Any:
@@ -247,7 +258,7 @@ class TabulatedEos:
             interval = min(max(interval, 0), len(self._pressure_mev_fm3) - 2)
             target = math.log(float(pressure))
             root = brentq(
-                lambda log_epsilon: float(
+                lambda log_epsilon, target=target: float(
                     self._log_pressure_from_log_epsilon(log_epsilon) - target
                 ),
                 float(log_energy_nodes[interval]),
@@ -257,10 +268,14 @@ class TabulatedEos:
             )
             flat_result[output_index] = math.exp(root)
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("energy-density interpolation left the declared table domain")
+            raise EosDomainError(
+                "energy-density interpolation left the declared table domain"
+            )
         return _scalar_or_array(result, scalar)
 
-    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+    def sound_speed_squared_from_energy_density(
+        self, energy_density_mev_fm3: Any
+    ) -> Any:
         values, scalar = _domain_values(
             energy_density_mev_fm3,
             name="energy_density_mev_fm3",
@@ -268,7 +283,9 @@ class TabulatedEos:
             upper=self.energy_density_max_mev_fm3,
         )
         pressure = np.asarray(self.pressure_from_energy_density(values), dtype=float)
-        slope = np.asarray(self._dlog_pressure_dlog_epsilon(np.log(values)), dtype=float)
+        slope = np.asarray(
+            self._dlog_pressure_dlog_epsilon(np.log(values)), dtype=float
+        )
         result = pressure * slope / values
         if not np.all(np.isfinite(result)):
             raise EosInputError("sound-speed derivative is nonfinite")

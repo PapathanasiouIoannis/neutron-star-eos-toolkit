@@ -21,12 +21,11 @@ from neutron_star_eos import (
     load_compose_eos,
     load_csv_eos,
 )
+from neutron_star_eos.cli import main as eos_tool_main
 from neutron_star_eos.tabulated import (
     _deduplicate_derived_validation_grid,
     _validation_grid_with_exact_endpoints,
 )
-from neutron_star_eos.cli import main as eos_tool_main
-
 
 K = 1.0e-3
 
@@ -35,7 +34,9 @@ def analytical_polytrope() -> AnalyticalEos:
     return AnalyticalEos(
         name="test-polytrope",
         pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-        sound_speed_squared_from_energy_density=lambda epsilon: 2.0 * K * np.asarray(epsilon),
+        sound_speed_squared_from_energy_density=lambda epsilon: (
+            2.0 * K * np.asarray(epsilon)
+        ),
         energy_density_domain_mev_fm3=(1.0, 400.0),
         source="independent test definition P=K epsilon^2",
     )
@@ -86,9 +87,9 @@ class EosInputTests(unittest.TestCase):
         eos = AnalyticalEos(
             name="scalar-functions",
             pressure_from_energy_density=lambda epsilon: K * float(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-            * K
-            * float(epsilon),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                2.0 * K * float(epsilon)
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="scalar-only test functions",
         )
@@ -102,8 +103,9 @@ class EosInputTests(unittest.TestCase):
         eos = AnalyticalEos(
             name="inconsistent-derivative",
             pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 0.1
-            * np.ones_like(np.asarray(epsilon, dtype=float)),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                0.1 * np.ones_like(np.asarray(epsilon, dtype=float))
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="deliberately inconsistent test definition",
         )
@@ -116,11 +118,12 @@ class EosInputTests(unittest.TestCase):
         bad_inverse = AnalyticalEos(
             name="inconsistent-inverse",
             pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-            * K
-            * np.asarray(epsilon),
-            energy_density_from_pressure=lambda pressure: 2.0
-            * np.ones_like(np.asarray(pressure, dtype=float)),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                2.0 * K * np.asarray(epsilon)
+            ),
+            energy_density_from_pressure=lambda pressure: (
+                2.0 * np.ones_like(np.asarray(pressure, dtype=float))
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="deliberately inconsistent test inverse",
         )
@@ -165,7 +168,9 @@ class EosInputTests(unittest.TestCase):
                     ["validate", "csv", str(path), "--format", "json"]
                 )
             self.assertEqual(status, 0)
-            self.assertEqual(json.loads(output.getvalue())["validation"]["status"], "pass")
+            self.assertEqual(
+                json.loads(output.getvalue())["validation"]["status"], "pass"
+            )
 
     def test_tabulated_input_fails_closed_without_repair(self) -> None:
         epsilon = np.asarray([1.0, 2.0, 3.0, 4.0])
@@ -297,10 +302,7 @@ class EosInputTests(unittest.TestCase):
         pressure = K * epsilon**2
 
         def row(index: int, q1: float, q3: float, q7: float) -> str:
-            return (
-                f"0 {index} 2 {q1:.17g} 0 {q3:.17g} 0 0 "
-                f"{q7:.17g} {q7:.17g} 1 42"
-            )
+            return f"0 {index} 2 {q1:.17g} 0 {q3:.17g} 0 0 {q7:.17g} {q7:.17g} 1 42"
 
         rows = []
         for index, density, eps, p in zip(range(5, 10), densities, epsilon, pressure):
@@ -336,10 +338,7 @@ class EosInputTests(unittest.TestCase):
             "eos.yq": "2\n2\n0.0\n",
             "eos.thermo": thermo + "\n",
             "eos.compo": "\n".join(
-                [
-                    f"0 {index} 2 {1 if index < 7 else 2} 0 0"
-                    for index in range(5, 10)
-                ]
+                [f"0 {index} 2 {1 if index < 7 else 2} 0 0" for index in range(5, 10)]
             )
             + "\n",
         }
@@ -368,7 +367,9 @@ class EosInputTests(unittest.TestCase):
             after = sorted(Path(temporary).iterdir())
             self.assertEqual(before, after)
             np.testing.assert_allclose(eos.baryon_density_fm3, densities)
-            np.testing.assert_allclose(eos.energy_density_mev_fm3, epsilon, rtol=2.0e-15)
+            np.testing.assert_allclose(
+                eos.energy_density_mev_fm3, epsilon, rtol=2.0e-15
+            )
             np.testing.assert_allclose(eos.pressure_mev_fm3, pressure, rtol=2.0e-15)
             np.testing.assert_allclose(
                 eos.baryon_chemical_potential_mev,
@@ -380,7 +381,9 @@ class EosInputTests(unittest.TestCase):
                 eos.compose_metadata["thermodynamic_duplicate_indices_last_row_wins"], 1
             )
             self.assertEqual(eos.compose_metadata["phase_code_rows_missing"], 0)
-            self.assertFalse(eos.compose_metadata["phase_codes_interpreted_as_discontinuities"])
+            self.assertFalse(
+                eos.compose_metadata["phase_codes_interpreted_as_discontinuities"]
+            )
             self.assertTrue(eos.validate(points=257).passed)
 
             directory_path = Path(temporary) / "compose-directory"

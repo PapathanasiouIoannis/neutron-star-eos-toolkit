@@ -12,7 +12,7 @@ from numpy.polynomial import Polynomial
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
-from neutron_star_eos.compose_dataset import (
+from neutron_star_eos.compose.dataset import (
     COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
     COMPOSE_DATASET_SCHEMA_VERSION,
     COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
@@ -33,7 +33,6 @@ from neutron_star_eos.eos import (
     _domain_values,
     _scalar_or_array,
 )
-
 
 COMPOSE_BAROTROPE_SCHEMA_VERSION = "compose_native_density_barotrope_v2"
 COMPOSE_INTERPOLATION_POLICY = "separate_log_pchip_in_native_baryon_density_v1"
@@ -83,7 +82,9 @@ class ComposeEos:
             cold_slice.baryon_chemical_potential_mev, dtype=float
         )
         if len(density) < 4:
-            raise EosInputError("continuous CompOSE barotrope requires at least four rows")
+            raise EosInputError(
+                "continuous CompOSE barotrope requires at least four rows"
+            )
         if (
             np.any(density <= 0.0)
             or np.any(pressure <= 0.0)
@@ -181,7 +182,9 @@ class ComposeEos:
             interval = min(max(interval, 0), len(nodes) - 2)
             target = math.log(candidate)
             flattened[output_index] = brentq(
-                lambda log_density: float(interpolant(log_density) - target),
+                lambda log_density, target=target: float(
+                    interpolant(log_density) - target
+                ),
                 float(self._log_density[interval]),
                 float(self._log_density[interval + 1]),
                 xtol=5.0e-15,
@@ -224,10 +227,16 @@ class ComposeEos:
         )
         log_density = self._log_density_from_epsilon(values)
         result = np.exp(self._pressure_from_density(log_density))
-        result = np.where(values == self.energy_density_min_mev_fm3, self.pressure_min_mev_fm3, result)
-        result = np.where(values == self.energy_density_max_mev_fm3, self.pressure_max_mev_fm3, result)
+        result = np.where(
+            values == self.energy_density_min_mev_fm3, self.pressure_min_mev_fm3, result
+        )
+        result = np.where(
+            values == self.energy_density_max_mev_fm3, self.pressure_max_mev_fm3, result
+        )
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("CompOSE interpolation left the selected density domain")
+            raise EosDomainError(
+                "CompOSE interpolation left the selected density domain"
+            )
         return _scalar_or_array(result, scalar)
 
     def energy_density_from_pressure(self, pressure_mev_fm3: Any) -> Any:
@@ -239,13 +248,21 @@ class ComposeEos:
         )
         log_density = self._log_density_from_pressure(values)
         result = np.exp(self._epsilon_from_density(log_density))
-        result = np.where(values == self.pressure_min_mev_fm3, self.energy_density_min_mev_fm3, result)
-        result = np.where(values == self.pressure_max_mev_fm3, self.energy_density_max_mev_fm3, result)
+        result = np.where(
+            values == self.pressure_min_mev_fm3, self.energy_density_min_mev_fm3, result
+        )
+        result = np.where(
+            values == self.pressure_max_mev_fm3, self.energy_density_max_mev_fm3, result
+        )
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("CompOSE interpolation left the selected pressure domain")
+            raise EosDomainError(
+                "CompOSE interpolation left the selected pressure domain"
+            )
         return _scalar_or_array(result, scalar)
 
-    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+    def sound_speed_squared_from_energy_density(
+        self, energy_density_mev_fm3: Any
+    ) -> Any:
         values, scalar = _domain_values(
             energy_density_mev_fm3,
             name="energy_density_mev_fm3",
@@ -281,16 +298,18 @@ class ComposeEos:
             width = right - left
             candidates.extend(
                 float(value)
-                for value in np.linspace(left, right, points_per_interval, endpoint=False)
+                for value in np.linspace(
+                    left, right, points_per_interval, endpoint=False
+                )
             )
-            fp_cubic, fp_quadratic, fp_linear, fp_constant = pressure_coefficients[:, index]
-            ep_cubic, ep_quadratic, ep_linear, ep_constant = epsilon_coefficients[:, index]
-            log_pressure = Polynomial(
-                (fp_constant, fp_linear, fp_quadratic, fp_cubic)
-            )
-            log_epsilon = Polynomial(
-                (ep_constant, ep_linear, ep_quadratic, ep_cubic)
-            )
+            fp_cubic, fp_quadratic, fp_linear, fp_constant = pressure_coefficients[
+                :, index
+            ]
+            ep_cubic, ep_quadratic, ep_linear, ep_constant = epsilon_coefficients[
+                :, index
+            ]
+            log_pressure = Polynomial((fp_constant, fp_linear, fp_quadratic, fp_cubic))
+            log_epsilon = Polynomial((ep_constant, ep_linear, ep_quadratic, ep_cubic))
             pressure_derivative = log_pressure.deriv()
             epsilon_derivative = log_epsilon.deriv()
             cs2_stationarity = (
@@ -300,8 +319,8 @@ class ComposeEos:
                 + pressure_derivative.deriv() * epsilon_derivative
                 - epsilon_derivative.deriv() * pressure_derivative
             )
-            endpoint_tolerance = 64.0 * np.finfo(float).eps * max(
-                1.0, abs(left), abs(right), width
+            endpoint_tolerance = (
+                64.0 * np.finfo(float).eps * max(1.0, abs(left), abs(right), width)
             )
             for polynomial in (
                 pressure_derivative,
@@ -330,14 +349,37 @@ class ComposeEos:
         epsilon = np.exp(self._epsilon_from_density(log_density))
         cs2 = self._cs2_from_log_density(log_density)
         issues: list[EosValidationIssue] = []
-        if np.any(~np.isfinite(pressure)) or np.any(~np.isfinite(epsilon)) or np.any(~np.isfinite(cs2)):
-            issues.append(EosValidationIssue("nonfinite", "interpolated pressure, energy density, or cs2 is nonfinite"))
+        if (
+            np.any(~np.isfinite(pressure))
+            or np.any(~np.isfinite(epsilon))
+            or np.any(~np.isfinite(cs2))
+        ):
+            issues.append(
+                EosValidationIssue(
+                    "nonfinite",
+                    "interpolated pressure, energy density, or cs2 is nonfinite",
+                )
+            )
         if np.any(pressure <= 0.0) or np.any(epsilon <= 0.0):
-            issues.append(EosValidationIssue("nonpositive_thermodynamics", "pressure and total energy density must remain positive"))
+            issues.append(
+                EosValidationIssue(
+                    "nonpositive_thermodynamics",
+                    "pressure and total energy density must remain positive",
+                )
+            )
         if np.any(np.diff(pressure) <= 0.0) or np.any(np.diff(epsilon) <= 0.0):
-            issues.append(EosValidationIssue("nonmonotone_native_interpolation", "native-density interpolation must remain strictly invertible"))
+            issues.append(
+                EosValidationIssue(
+                    "nonmonotone_native_interpolation",
+                    "native-density interpolation must remain strictly invertible",
+                )
+            )
         if np.any(cs2 <= 0.0):
-            issues.append(EosValidationIssue("mechanical_instability", "dP/dE must remain positive"))
+            issues.append(
+                EosValidationIssue(
+                    "mechanical_instability", "dP/dE must remain positive"
+                )
+            )
         if np.any(cs2 > 1.0):
             issues.append(EosValidationIssue("acausal", "dP/dE must not exceed one"))
         return EosValidationReport(
@@ -503,7 +545,9 @@ def load_compose_eos(
         )
     if includes_leptons is not True:
         raise EosInputError("v2 stellar CompOSE input must explicitly include leptons")
-    dataset = load_compose_dataset(path_or_zip, model_id=model_id, source_url=source_url)
+    dataset = load_compose_dataset(
+        path_or_zip, model_id=model_id, source_url=source_url
+    )
     return build_compose_eos(
         dataset,
         matter=matter,

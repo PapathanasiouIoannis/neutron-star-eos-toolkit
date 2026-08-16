@@ -21,7 +21,6 @@ from neutron_star_eos import (
 )
 from neutron_star_eos.cli import main as eos_tool_main
 
-
 NEUTRON_MASS_MEV = 939.5651828
 K = 5.0e-4
 
@@ -110,9 +109,7 @@ def write_compose_fixture(
                 f"{temperature_index} {density_index} 2 "
                 f"{1 if density_index < 8 else 2} {composition_payload}"
             )
-    thermo = "\n".join(
-        [f"{neutron_mass_mev:.17g} 938.2718440 1", *rows]
-    ) + "\n"
+    thermo = "\n".join([f"{neutron_mass_mev:.17g} 938.2718440 1", *rows]) + "\n"
     files = {
         "eos.t": (
             f"0\n{len(temperatures) - 1}\n"
@@ -154,14 +151,18 @@ class ComposeWorkflowTests(unittest.TestCase):
                 density_values=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
                 native_q_values=((1.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.1),) * 6,
             )
-            with self.assertRaisesRegex(EosInputError, "eos.nb must be strictly positive"):
+            with self.assertRaisesRegex(
+                EosInputError, "eos.nb must be strictly positive"
+            ):
                 load_compose_dataset(
                     archive,
                     model_id="zero-density",
                     source_url="https://example.invalid/zero-density",
                 )
 
-    def test_zero_pressure_remains_native_visible_but_blocks_log_barotrope(self) -> None:
+    def test_zero_pressure_remains_native_visible_but_blocks_log_barotrope(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(
                 Path(temporary),
@@ -187,7 +188,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                 "sampled_pressure_nonpositive",
                 {item.code for item in profile.diagnostics},
             )
-            with self.assertRaisesRegex(EosInputError, "continuous invertible barotrope"):
+            with self.assertRaisesRegex(
+                EosInputError, "continuous invertible barotrope"
+            ):
                 build_compose_eos(cold)
 
     def test_variable_nadd_width_is_preserved_with_explicit_availability(self) -> None:
@@ -273,7 +276,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                 atol=0.0,
             )
 
-    def test_source_diagnostics_warn_without_invalidating_pressure_energy_path(self) -> None:
+    def test_source_diagnostics_warn_without_invalidating_pressure_energy_path(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(Path(temporary), q5=1.0e-4)
             dataset = load_compose_dataset(
@@ -296,7 +301,9 @@ class ComposeWorkflowTests(unittest.TestCase):
             )
             self.assertTrue(build_compose_eos(cold_slice).validate(points=257).passed)
 
-    def test_native_q_profile_reconstructs_all_cold_quantities_before_barotrope(self) -> None:
+    def test_native_q_profile_reconstructs_all_cold_quantities_before_barotrope(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(
                 Path(temporary),
@@ -343,14 +350,18 @@ class ComposeWorkflowTests(unittest.TestCase):
                 atol=0.0,
             )
             self.assertIn("q1_pressure_per_baryon_mev", profile.column_names)
-            self.assertIn("q7_internal_energy_per_baryon_over_mn_minus_1", profile.column_names)
+            self.assertIn(
+                "q7_internal_energy_per_baryon_over_mn_minus_1", profile.column_names
+            )
             self.assertNotIn("composition_pair_999", profile.column_names)
             self.assertIn("micro_999", profile.column_names)
             self.assertEqual(profile.column("micro_999")[0], 0.5)
             with self.assertRaises(ValueError):
                 profile.column("pressure_mev_fm3")[0] = 0.0
 
-    def test_native_q_consistent_fixture_closes_and_sound_speed_routes_coincide(self) -> None:
+    def test_native_q_consistent_fixture_closes_and_sound_speed_routes_coincide(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             densities = (1.0, 2.0, 3.0)
             native_q_values = tuple(
@@ -430,7 +441,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                     atol=2.0e-14,
                 )
 
-    def test_native_q_inconsistent_fixture_exposes_route_and_closure_divergence(self) -> None:
+    def test_native_q_inconsistent_fixture_exposes_route_and_closure_divergence(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             densities = (1.0, 2.0, 3.0)
             native_q_values = tuple(
@@ -488,7 +501,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                     atol=2.0e-14,
                 )
 
-    def test_composition_quadruple_preserves_compose_field_order_and_neutron_number(self) -> None:
+    def test_composition_quadruple_preserves_compose_field_order_and_neutron_number(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(
                 Path(temporary),
@@ -536,7 +551,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                     includes_leptons=True,
                 )
 
-    def test_native_profile_summary_retains_hashes_positions_and_cold_na_contract(self) -> None:
+    def test_native_profile_summary_retains_hashes_positions_and_cold_na_contract(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(Path(temporary))
             dataset = load_compose_dataset(
@@ -576,7 +593,9 @@ class ComposeWorkflowTests(unittest.TestCase):
             self.assertEqual(query_grid["final_points"], 2)
             self.assertEqual(
                 query_grid["float64_little_endian_sha256"],
-                hashlib.sha256(np.asarray((0.1, 0.2), dtype="<f8").tobytes()).hexdigest(),
+                hashlib.sha256(
+                    np.asarray((0.1, 0.2), dtype="<f8").tobytes()
+                ).hexdigest(),
             )
             self.assertEqual(summary["interpolation"]["query_grid"], query_grid)
             self.assertEqual(
@@ -611,7 +630,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                 cold_slice.pressure_mev_fm3,
             )
 
-    def test_native_q_interpolation_is_linear_in_raw_density_and_right_differentiated(self) -> None:
+    def test_native_q_interpolation_is_linear_in_raw_density_and_right_differentiated(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             densities = (0.1, 0.2, 0.5, 1.0)
             q1 = np.asarray((1.0, 3.0, 6.0, 16.0))
@@ -717,7 +738,9 @@ class ComposeWorkflowTests(unittest.TestCase):
                 ordering_policy="diagnostic_monotone_subsequence",
             )
             selection = diagnostic.provenance()["selection"]
-            self.assertEqual(selection["ordering_policy"], "diagnostic_monotone_subsequence")
+            self.assertEqual(
+                selection["ordering_policy"], "diagnostic_monotone_subsequence"
+            )
             self.assertEqual(selection["omitted_source_positions"], [2])
             self.assertFalse(
                 selection["diagnostic_reduction_is_physical_transition_policy"]
@@ -926,7 +949,9 @@ class ComposeWorkflowTests(unittest.TestCase):
             self.assertEqual(two_row_exit, 0)
             self.assertEqual(two_row_payload["density_selection"]["source_rows"], 2)
             self.assertTrue(
-                two_row_payload["native_thermodynamics"]["status"].startswith("available")
+                two_row_payload["native_thermodynamics"]["status"].startswith(
+                    "available"
+                )
             )
             self.assertEqual(two_row_payload["barotrope"]["status"], "unavailable")
 

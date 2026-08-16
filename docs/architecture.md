@@ -14,9 +14,9 @@ CompOSE source      -> native-Q thermodynamics --/
 
 ## Public workflow
 
-`model.py` provides `open_eos`, `EosModel`, and the capability report. It only
-coordinates existing scientific objects; it does not give different source
-types a shared interpolation policy.
+`model.py` provides `open_eos`, `EosModel`, the capability report, and a
+read-only thermodynamic presentation view. It coordinates existing scientific
+objects; it does not give different source types a shared interpolation policy.
 
 ```python
 model = open_eos(path, kind="csv")
@@ -32,17 +32,21 @@ modules.
 
 | File | Responsibility |
 |---|---|
-| `model.py` | High-level loading, capabilities, orchestration, and explicit result bundles |
-| `eos.py` | Common continuous-barotrope contract, validation reports, errors, and analytical inputs |
+| `model.py` | High-level loading, capabilities, orchestration, and thermodynamic views |
+| `output.py` | Deterministic, non-overwriting inspection and stellar bundles |
+| `thermodynamics.py` | Read-only source/native/barotrope presentation contracts |
+| `eos.py` | Common continuous-barotrope contract, validation reports, and errors |
+| `analytical.py` | Focused analytical-adapter import and compatibility boundary |
 | `tabulated.py` | Ordinary CSV/array barotropes and their fixed interpolation policy |
-| `compose_dataset.py` | Lossless CompOSE parsing, hashes, cold-slice selection, and source diagnostics |
-| `compose_thermodynamics.py` | Native-Q interpolation and reconstructed thermodynamic quantities |
-| `compose.py` | Optional continuous CompOSE barotrope for stellar backgrounds |
+| `compose/dataset.py` | Lossless CompOSE parsing, hashes, cold-slice selection, and source diagnostics |
+| `compose/thermodynamics.py` | Native-Q interpolation and reconstructed thermodynamic quantities |
+| `compose/barotrope.py` | Optional continuous CompOSE barotrope for stellar backgrounds |
+| `plotting.py` | Optional presentation of already-loaded data and computed results |
 | `stellar.py` | Continuous source-boundary TOV stars and sequences |
 | `cli.py` | Argument parsing and display; scientific orchestration delegates to `model.py` |
 | `__init__.py` | Stable beginner imports plus retained advanced compatibility imports |
 
-The three CompOSE modules are intentionally separate. Combining them would
+The three CompOSE layers form one subpackage but remain intentionally separate. Combining them would
 hide the important case in which source parsing and native thermodynamics
 succeed while a continuous pressure-energy-density reduction is unavailable.
 
@@ -50,13 +54,16 @@ succeed while a continuous pressure-energy-density reduction is unavailable.
 
 ```text
 eos.py
+├── analytical.py
 ├── tabulated.py
-├── compose_dataset.py
-│   ├── compose_thermodynamics.py
-│   └── compose.py
+├── compose/dataset.py
+│   ├── compose/thermodynamics.py
+│   └── compose/barotrope.py
 └── stellar.py
 
 model.py -> all workflow layers
+output.py -> model/result presentation contracts
+plotting.py -> thermodynamic views and existing results
 cli.py   -> model.py
 ```
 

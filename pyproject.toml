@@ -1,22 +1,53 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "neutron-star-eos-toolkit"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Analytical, CSV, and CompOSE cold-EoS inputs with background TOV models"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 authors = [{name = "Ioannis Papathanasiou"}]
+keywords = ["neutron stars", "equation of state", "TOV", "CompOSE"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Operating System :: OS Independent",
+]
 dependencies = [
   "numpy==1.26.4",
   "scipy==1.13.1",
 ]
 
+[project.optional-dependencies]
+plot = [
+  "matplotlib>=3.8,<4",
+]
+notebook = [
+  "jupyterlab>=4,<5",
+  "ipykernel>=6.29,<7",
+  "matplotlib>=3.8,<4",
+]
+notebook-test = [
+  "nbclient>=0.10,<1",
+  "nbformat>=5.10,<6",
+]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.11,<2",
+  "ruff>=0.9,<1",
+  "twine>=6,<7",
+]
+
 [project.urls]
 Repository = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit"
 Issues = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/issues"
+Documentation = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/tree/main/docs"
+Changelog = "https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/blob/main/CHANGELOG.md"
 
 [project.scripts]
 eos-tool = "neutron_star_eos.cli:main"
@@ -29,3 +60,30 @@ where = ["src"]
 include = ["neutron_star_eos*"]
 exclude = ["tests*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+neutron_star_eos = ["styles/*.mplstyle"]
+
+[tool.setuptools.dynamic]
+version = {attr = "neutron_star_eos._version.__version__"}
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I"]
+ignore = ["B905", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/neutron_star_eos/__init__.py" = ["F401"]
+"src/neutron_star_eos/compose_dataset.py" = ["F401", "F403"]
+"src/neutron_star_eos/compose_thermodynamics.py" = ["F401", "F403"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/neutron_star_eos"]
+warn_unused_configs = true
+no_implicit_optional = true
+check_untyped_defs = true
+disable_error_code = ["import-untyped"]

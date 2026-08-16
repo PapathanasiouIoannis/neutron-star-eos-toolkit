@@ -7,11 +7,11 @@ import numpy as np
 from neutron_star_eos import (
     AnalyticalEos,
     EosDomainError,
+    StellarConfig,
     TabulatedEos,
     solve_sequence,
     solve_star,
 )
-
 
 K = 1.0e-3
 
@@ -20,9 +20,9 @@ def analytical_polytrope() -> AnalyticalEos:
     return AnalyticalEos(
         name="test-polytrope",
         pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-        sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-        * K
-        * np.asarray(epsilon),
+        sound_speed_squared_from_energy_density=lambda epsilon: (
+            2.0 * K * np.asarray(epsilon)
+        ),
         energy_density_domain_mev_fm3=(1.0, 400.0),
         source="independent test definition P=K epsilon^2",
     )
@@ -119,8 +119,9 @@ class StellarTests(unittest.TestCase):
         eos = AnalyticalEos(
             name="narrow-domain",
             pressure_from_energy_density=lambda epsilon: 0.1 * np.asarray(epsilon),
-            sound_speed_squared_from_energy_density=lambda epsilon: 0.1
-            * np.ones_like(np.asarray(epsilon)),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                0.1 * np.ones_like(np.asarray(epsilon))
+            ),
             energy_density_domain_mev_fm3=(100.0, 100.00004),
             source="narrow-domain regression",
         )
@@ -138,6 +139,13 @@ class StellarTests(unittest.TestCase):
             solve_star(eos, eos.pressure_max_mev_fm3 * 1.01)
         with self.assertRaises(EosDomainError):
             solve_sequence(eos, [1.0, eos.pressure_max_mev_fm3 * 1.01])
+
+    def test_solver_counts_require_integers(self) -> None:
+        eos = analytical_polytrope()
+        with self.assertRaisesRegex(TypeError, "points must be an integer"):
+            solve_sequence(eos, points=9.5)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(TypeError, "profile_points must be an integer"):
+            solve_star(eos, 100.0, config=StellarConfig(profile_points=2.5))  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

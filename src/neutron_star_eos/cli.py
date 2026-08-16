@@ -6,8 +6,9 @@ import argparse
 import json
 from typing import Sequence
 
+from neutron_star_eos._version import __version__
 from neutron_star_eos.compose import COMPOSE_ORDERING_POLICIES
-from neutron_star_eos.eos import EosInputError
+from neutron_star_eos.eos import EosDomainError, EosInputError
 from neutron_star_eos.model import EosModel, open_eos
 from neutron_star_eos.stellar import STELLAR_VALIDATION_MODES
 from neutron_star_eos.tabulated import load_csv_eos
@@ -50,6 +51,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eos-tool",
         description="Inspect an EoS or calculate continuous stellar backgrounds.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -189,7 +193,10 @@ def _inspection_exit_code(model: EosModel, *, require_barotrope: bool) -> int:
         return 2
     if require_barotrope and not report.capability("continuous_barotrope").available:
         return 2
-    if model.kind != "compose" and not report.capability("continuous_barotrope").available:
+    if (
+        model.kind != "compose"
+        and not report.capability("continuous_barotrope").available
+    ):
         return 2
     return 0
 
@@ -243,9 +250,7 @@ def _compose_text(payload: dict[str, object]) -> str:
         if cold_slice.get("reason"):
             lines.append(f"- {cold_slice['reason']}")
         for item in cold_slice.get("diagnostics", []):
-            lines.append(
-                f"- {item['severity']} {item['code']}: {item['message']}"
-            )
+            lines.append(f"- {item['severity']} {item['code']}: {item['message']}")
     density_selection = payload.get("density_selection")
     if isinstance(density_selection, dict):
         lines.append(
@@ -254,12 +259,8 @@ def _compose_text(payload: dict[str, object]) -> str:
             f"[{density_selection['baryon_density_min_fm3']:.12g}, "
             f"{density_selection['baryon_density_max_fm3']:.12g}] fm^-3"
         )
-        requested_minimum = density_selection.get(
-            "requested_baryon_density_min_fm3"
-        )
-        requested_maximum = density_selection.get(
-            "requested_baryon_density_max_fm3"
-        )
+        requested_minimum = density_selection.get("requested_baryon_density_min_fm3")
+        requested_maximum = density_selection.get("requested_baryon_density_max_fm3")
         if requested_minimum is not None or requested_maximum is not None:
             lines.append(
                 "- requested bounds: "
@@ -278,9 +279,7 @@ def _compose_text(payload: dict[str, object]) -> str:
                 f"{len(native['columns'])} preserved or reconstructed columns"
             )
         for item in native.get("diagnostics", []):
-            lines.append(
-                f"- {item['severity']} {item['code']}: {item['message']}"
-            )
+            lines.append(f"- {item['severity']} {item['code']}: {item['message']}")
     if isinstance(barotrope, dict):
         lines.append(f"Continuous barotrope: {barotrope['status']}")
         if barotrope.get("reason"):
@@ -334,6 +333,25 @@ def _assess_compose(arguments: argparse.Namespace) -> tuple[dict[str, object], i
     )
 
 
+def _failure_reason_code(exc: BaseException) -> str:
+    """Classify command failures without making callers parse error messages."""
+
+    supplied = getattr(exc, "reason_code", None)
+    if isinstance(supplied, str) and supplied:
+        return supplied
+    if isinstance(exc, EosDomainError):
+        return "eos_domain_error"
+    if isinstance(exc, EosInputError):
+        return "eos_input_error"
+    if isinstance(exc, OSError):
+        return "io_error"
+    if isinstance(exc, ArithmeticError):
+        return "arithmetic_error"
+    if isinstance(exc, ValueError):
+        return "value_error"
+    return "runtime_error"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command in {"inspect", "star", "sequence"}:
@@ -350,52 +368,63 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 text_output = model.summary()
             elif arguments.command == "star":
-                result = model.solve_star(
+                star_result = model.solve_star(
                     arguments.central_pressure_mev_fm3,
                     validation_mode=arguments.validation_mode,
                 )
                 payload = {
                     "model": model.report().to_dict(),
-                    "star": result.to_dict(),
+                    "star": star_result.to_dict(),
                 }
                 if arguments.output:
-                    output_directory = model.write_star(arguments.output, result)
+                    output_directory = model.write_star(arguments.output, star_result)
                 exit_code = 0
                 text_output = "\n".join(
                     (
                         f"Model: {model.model_name}",
-                        f"Mass: {result.mass_msun:.12g} Msun",
-                        f"Radius: {result.radius_km:.12g} km",
-                        f"Boundary: {result.boundary_status}",
+                        f"Mass: {star_result.mass_msun:.12g} Msun",
+                        f"Radius: {star_result.radius_km:.12g} km",
+                        f"Boundary: {star_result.boundary_status}",
                     )
                 )
             else:
-                result = model.solve_sequence(
+                sequence_result = model.solve_sequence(
                     points=arguments.points,
                     validation_mode=arguments.validation_mode,
                 )
                 payload = {
                     "model": model.report().to_dict(),
-                    "sequence": result.to_dict(),
+                    "sequence": sequence_result.to_dict(),
                 }
                 if arguments.output:
                     output_directory = model.write_sequence(
-                        arguments.output, result
+                        arguments.output, sequence_result
                     )
-                exit_code = 0 if result.status == "complete" else 1
+                exit_code = 0 if sequence_result.status == "complete" else 1
                 text_output = "\n".join(
                     (
                         f"Model: {model.model_name}",
-                        f"Sequence: {result.status}",
-                        f"Solved: {len(result.stars)}/{len(result.attempts)}",
-                        f"Boundary: {result.boundary_status}",
+                        f"Sequence: {sequence_result.status}",
+                        "Solved: "
+                        f"{len(sequence_result.stars)}/{len(sequence_result.attempts)}",
+                        f"Boundary: {sequence_result.boundary_status}",
                     )
                 )
             if output_directory is not None:
                 payload["output_directory"] = str(output_directory)
                 text_output += f"\nOutput: {output_directory}"
-        except (EosInputError, OSError, ValueError, RuntimeError, ArithmeticError) as exc:
-            payload = {"status": "fail", "error": str(exc)}
+        except (
+            EosInputError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            ArithmeticError,
+        ) as exc:
+            payload = {
+                "status": "fail",
+                "reason_code": _failure_reason_code(exc),
+                "error": str(exc),
+            }
             text_output = f"{arguments.command.capitalize()}: FAIL\n{exc}"
             exit_code = 2
         if arguments.format == "json":

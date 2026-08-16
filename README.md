@@ -30,6 +30,22 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install .
 ```
 
+## Interactive experiments
+
+Install the optional notebook tools and open the guided experiment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[notebook]"
+.\.venv\Scripts\jupyter-lab.exe .\notebooks\eos_experiments.ipynb
+```
+
+The notebook runs with the supplied CSV by default. It can also load a user
+CSV, a CompOSE source, or the editable analytical definition in
+[`notebooks/analytical_eos.py`](notebooks/analytical_eos.py). That file holds
+the authoritative user function `P(epsilon)` and its consistent
+`dP/d(epsilon)`; the notebook handles inspection, plots, stellar calculations,
+and provenance.
+
 ## First command
 
 Inspect the supplied CSV without running a stellar solver or writing files:
@@ -118,8 +134,27 @@ profile = model.native_thermodynamics
 CompOSE parsing, native-Q thermodynamics, and the optional continuous stellar
 barotrope are separate layers. A pressure reversal can make
 `continuous_barotrope` unavailable while `thermodynamics` remains available
-with diagnostics. See [the CompOSE guide](https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/blob/main/docs/compose.md) for the native
+with diagnostics. See [the CompOSE guide](docs/compose.md) for the native
 quantities, density selection, and diagnostic ordering policies.
+
+## Plotting
+
+Plotting is optional and never runs a solver, repairs data, or writes files:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[plot]"
+```
+
+```python
+import matplotlib.pyplot as plt
+from neutron_star_eos.plotting import plot_pressure_energy
+
+fig, ax = plt.subplots(constrained_layout=True)
+plot_pressure_energy(model, ax=ax)
+```
+
+Raw source nodes, native CompOSE thermodynamics, and evaluated continuous
+barotropes remain visually distinct. See the [plotting guide](docs/plotting.md).
 
 ## Command line
 
@@ -182,11 +217,12 @@ two-fluid dark-matter stars are outside this release and remain unavailable.
 ```text
 src/neutron_star_eos/  public package
 examples/              one runnable example per input type
+notebooks/             guided experiments and editable analytical definition
 docs/                  concise architecture and CompOSE guidance
 tests/                 synthetic interface and solver tests
 ```
 
-See [the architecture map](https://github.com/PapathanasiouIoannis/neutron-star-eos-toolkit/blob/main/docs/architecture.md) for the responsibility of
+See [the architecture map](docs/architecture.md) for the responsibility of
 every source file. The repository deliberately contains no downloaded
 CompOSE tables, research campaigns, manuscripts, validation packets, or
 publication figures.
@@ -197,6 +233,12 @@ publication figures.
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+The [parameter reference](docs/parameters.md),
+[diagnostic reference](docs/diagnostics.md), and
+[reproducibility guide](docs/reproducibility.md) describe the public contracts
+used by the CLI and notebook. See [CONTRIBUTING.md](CONTRIBUTING.md) before
+changing scientific behavior.
 
 This is currently a private pre-release. A software licence must be selected
 before public redistribution.

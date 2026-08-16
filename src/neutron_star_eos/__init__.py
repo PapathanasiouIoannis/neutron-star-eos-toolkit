@@ -1,5 +1,7 @@
 """Small, fail-closed tools for continuous cold neutron-star barotropes."""
 
+from neutron_star_eos._version import __version__
+from neutron_star_eos.analytical import AnalyticalEos
 from neutron_star_eos.compose import (
     COMPOSE_ORDERING_POLICIES,
     ComposeColdSlice,
@@ -10,14 +12,13 @@ from neutron_star_eos.compose import (
     load_compose_dataset,
     load_compose_eos,
 )
-from neutron_star_eos.compose_thermodynamics import (
+from neutron_star_eos.compose.thermodynamics import (
     COMPOSE_NATIVE_INTERPOLATION_POLICY,
     ComposeProfileDiagnostic,
     ComposeThermodynamicProfile,
     interpolate_compose_thermodynamics,
 )
 from neutron_star_eos.eos import (
-    AnalyticalEos,
     ColdBarotrope,
     EosDomainError,
     EosInputError,
@@ -34,15 +35,17 @@ from neutron_star_eos.model import (
 from neutron_star_eos.stellar import (
     BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES,
     DEFAULT_STELLAR_CONFIG,
+    STELLAR_VALIDATION_MODES,
     SequenceAttempt,
     SequenceResult,
     StarResult,
     StellarConfig,
-    STELLAR_VALIDATION_MODES,
+    StellarSolveError,
     solve_sequence,
     solve_star,
 )
 from neutron_star_eos.tabulated import TabulatedEos, load_csv_eos
+from neutron_star_eos.thermodynamics import ThermodynamicSeries, ThermodynamicView
 
 # Keep the wildcard/documentation surface small.  The advanced compatibility
 # names imported above remain available for explicit imports used by existing

@@ -172,7 +172,9 @@ def _evaluate_user_function(
             [float(function(float(value))) for value in values.reshape(-1)], dtype=float
         ).reshape(values.shape)
     except (TypeError, ValueError, ArithmeticError) as exc:
-        raise EosInputError(f"analytical {name} could not evaluate the declared domain") from exc
+        raise EosInputError(
+            f"analytical {name} could not evaluate the declared domain"
+        ) from exc
     return result
 
 
@@ -229,10 +231,16 @@ class AnalyticalEos:
         endpoint_pressure = _evaluate_user_function(
             self._pressure, np.asarray([lower, upper]), name="pressure"
         )
-        if endpoint_pressure.shape != (2,) or not np.all(np.isfinite(endpoint_pressure)):
-            raise EosInputError("analytical pressure function must support a two-value array")
+        if endpoint_pressure.shape != (2,) or not np.all(
+            np.isfinite(endpoint_pressure)
+        ):
+            raise EosInputError(
+                "analytical pressure function must support a two-value array"
+            )
         if endpoint_pressure[0] <= 0.0 or endpoint_pressure[1] <= endpoint_pressure[0]:
-            raise EosInputError("analytical endpoint pressure must be positive and increasing")
+            raise EosInputError(
+                "analytical endpoint pressure must be positive and increasing"
+            )
         self.pressure_min_mev_fm3 = float(endpoint_pressure[0])
         self.pressure_max_mev_fm3 = float(endpoint_pressure[1])
 
@@ -248,7 +256,9 @@ class AnalyticalEos:
             raise EosInputError("analytical pressure returned invalid values")
         return _scalar_or_array(result, scalar)
 
-    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+    def sound_speed_squared_from_energy_density(
+        self, energy_density_mev_fm3: Any
+    ) -> Any:
         values, scalar = _domain_values(
             energy_density_mev_fm3,
             name="energy_density_mev_fm3",
@@ -281,7 +291,9 @@ class AnalyticalEos:
                     flat[index] = self.energy_density_max_mev_fm3
                 else:
                     flat[index] = brentq(
-                        lambda epsilon: float(self._pressure(epsilon)) - float(pressure),
+                        lambda epsilon, pressure=pressure: (
+                            float(self._pressure(epsilon)) - float(pressure)
+                        ),
                         self.energy_density_min_mev_fm3,
                         self.energy_density_max_mev_fm3,
                         xtol=5.0e-14,
@@ -289,9 +301,8 @@ class AnalyticalEos:
                     )
         if result.shape != values.shape or not np.all(np.isfinite(result)):
             raise EosInputError("analytical pressure inversion returned invalid values")
-        if (
-            np.any(result < self.energy_density_min_mev_fm3)
-            or np.any(result > self.energy_density_max_mev_fm3)
+        if np.any(result < self.energy_density_min_mev_fm3) or np.any(
+            result > self.energy_density_max_mev_fm3
         ):
             raise EosDomainError(
                 "analytical pressure inversion left the declared energy-density domain"
@@ -448,22 +459,27 @@ def _validate_eos_grid(
         raise ValueError("validation grid must contain at least 17 points")
     if not np.all(np.isfinite(epsilon)) or np.any(np.diff(epsilon) <= 0.0):
         raise ValueError("validation grid must be finite and strictly increasing")
-    if (
-        epsilon[0] != float(eos.energy_density_min_mev_fm3)
-        or epsilon[-1] != float(eos.energy_density_max_mev_fm3)
+    if epsilon[0] != float(eos.energy_density_min_mev_fm3) or epsilon[-1] != float(
+        eos.energy_density_max_mev_fm3
     ):
         raise ValueError("validation grid must include the exact declared endpoints")
     pressure = np.asarray(eos.pressure_from_energy_density(epsilon), dtype=float)
     cs2 = np.asarray(eos.sound_speed_squared_from_energy_density(epsilon), dtype=float)
     issues: list[EosValidationIssue] = []
     if not np.all(np.isfinite(pressure)) or not np.all(np.isfinite(cs2)):
-        issues.append(EosValidationIssue("nonfinite", "pressure or sound speed is nonfinite"))
+        issues.append(
+            EosValidationIssue("nonfinite", "pressure or sound speed is nonfinite")
+        )
     if np.any(pressure <= 0.0):
         issues.append(
             EosValidationIssue("nonpositive_pressure", "pressure must remain positive")
         )
     if np.any(np.diff(pressure) <= 0.0):
-        issues.append(EosValidationIssue("nonmonotone_pressure", "pressure must increase strictly"))
+        issues.append(
+            EosValidationIssue(
+                "nonmonotone_pressure", "pressure must increase strictly"
+            )
+        )
     if np.any(cs2 <= 0.0):
         issues.append(
             EosValidationIssue("mechanical_instability", "dP/dE must remain positive")

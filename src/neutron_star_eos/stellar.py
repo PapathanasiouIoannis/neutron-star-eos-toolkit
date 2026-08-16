@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Iterable
+from typing import Any, Iterable, cast
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -21,13 +21,18 @@ from neutron_star_eos.eos import (
     _eos_provenance_sha256,
 )
 
-
 GRAVITY_CONVERSION = 1.124e-5
 SOLAR_MASS_LENGTH_KM = 1.4766
 STELLAR_VALIDATION_MODES = ("strict", "background_diagnostic")
-BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES = frozenset(
-    {"acausal", "mechanical_instability"}
-)
+BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES = frozenset({"acausal", "mechanical_instability"})
+
+
+class StellarSolveError(RuntimeError):
+    """A structured stellar-integration failure suitable for sequences."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,11 +124,13 @@ class SequenceAttempt:
     status: str
     star: StarResult | None
     reason: str | None
+    reason_code: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "central_pressure_MeV_fm3": self.central_pressure_mev_fm3,
             "status": self.status,
+            "reason_code": self.reason_code,
             "reason": self.reason,
             "star": None if self.star is None else self.star.to_dict(),
         }
@@ -166,7 +173,7 @@ class SequenceResult:
 
 def _finite(name: str, value: object) -> float:
     try:
-        result = float(value)
+        result = float(cast(Any, value))
     except (TypeError, ValueError) as exc:
         raise EosInputError(f"{name} must be finite") from exc
     if not math.isfinite(result):
@@ -190,7 +197,11 @@ def _checked_config(config: StellarConfig | None) -> StellarConfig:
             raise ValueError(f"{name} must be positive")
     if resolved.radius_max_km <= resolved.radius_start_km:
         raise ValueError("radius_max_km must exceed radius_start_km")
-    if int(resolved.profile_points) < 2:
+    if isinstance(resolved.profile_points, bool) or not isinstance(
+        resolved.profile_points, int
+    ):
+        raise TypeError("profile_points must be an integer")
+    if resolved.profile_points < 2:
         raise ValueError("profile_points must be at least two")
     return resolved
 
@@ -200,9 +211,7 @@ def _validation_for_stellar_background(
     validation_mode: str,
 ) -> tuple[object, tuple[str, ...], str]:
     if validation_mode not in STELLAR_VALIDATION_MODES:
-        raise ValueError(
-            f"validation_mode must be one of {STELLAR_VALIDATION_MODES}"
-        )
+        raise ValueError(f"validation_mode must be one of {STELLAR_VALIDATION_MODES}")
     report = eos.validate()
     issue_codes = tuple(item.code for item in report.issues)
     if validation_mode == "strict":
@@ -213,8 +222,7 @@ def _validation_for_stellar_background(
     )
     if blockers:
         raise EosInputError(
-            "background diagnostic cannot bypass EoS issue(s): "
-            + ", ".join(blockers)
+            "background diagnostic cannot bypass EoS issue(s): " + ", ".join(blockers)
         )
     status = "pass" if not issue_codes else "diagnostic_with_issues"
     return report, issue_codes, status
@@ -269,9 +277,13 @@ def _solve_validated_star_radius(
         evaluation_pressure = max(pressure, pressure_min)
         epsilon, cs2 = map(float, eos(evaluation_pressure))
         if not math.isfinite(epsilon) or epsilon <= 0.0:
-            raise EosInputError("EoS returned invalid energy density during TOV integration")
+            raise EosInputError(
+                "EoS returned invalid energy density during TOV integration"
+            )
         if not math.isfinite(cs2) or not 0.0 < cs2 <= 1.0:
-            raise EosInputError("EoS returned invalid sound speed during TOV integration")
+            raise EosInputError(
+                "EoS returned invalid sound speed during TOV integration"
+            )
         pressure_safe = max(pressure, pressure_min)
         dm_dr = radius**2 * epsilon * GRAVITY_CONVERSION
         if radius <= config.center_expansion_limit_km:
@@ -283,9 +295,7 @@ def _solve_validated_star_radius(
                 * radius
             )
         else:
-            denominator = radius * (
-                radius - 2.0 * mass * SOLAR_MASS_LENGTH_KM
-            )
+            denominator = radius * (radius - 2.0 * mass * SOLAR_MASS_LENGTH_KM)
             if not math.isfinite(denominator) or denominator <= 0.0:
                 raise EosInputError(
                     "TOV integration reached the Schwarzschild-radius boundary"
@@ -303,8 +313,9 @@ def _solve_validated_star_radius(
     def boundary_event(_radius: float, state: np.ndarray) -> float:
         return float(state[1] - pressure_min)
 
-    boundary_event.terminal = True
-    boundary_event.direction = -1
+    boundary_event_attributes = cast(Any, boundary_event)
+    boundary_event_attributes.terminal = True
+    boundary_event_attributes.direction = -1
     solution = solve_ivp(
         rhs,
         (radius_start, config.radius_max_km),
@@ -317,14 +328,26 @@ def _solve_validated_star_radius(
     )
     event_count = len(solution.t_events[0]) if solution.t_events else 0
     if solution.status != 1 or event_count != 1:
-        raise RuntimeError(
+        if solution.status == 0 and event_count == 0:
+            raise StellarSolveError(
+                "radius_limit_reached",
+                "the EoS lower-pressure boundary was not reached before "
+                f"radius_max_km={config.radius_max_km:.12g}",
+            )
+        raise StellarSolveError(
+            "boundary_event_failure",
             "the EoS lower-pressure boundary was not reached exactly once "
-            f"(solver_status={solution.status}, event_count={event_count})"
+            f"(solver_status={solution.status}, event_count={event_count})",
         )
     event_state = np.asarray(solution.y_events[0][0], dtype=float)
     mass = float(event_state[0])
     radius = float(solution.t_events[0][0])
-    if not math.isfinite(mass) or not math.isfinite(radius) or mass <= 0.0 or radius <= 0.0:
+    if (
+        not math.isfinite(mass)
+        or not math.isfinite(radius)
+        or mass <= 0.0
+        or radius <= 0.0
+    ):
         raise RuntimeError("TOV boundary mass or radius is invalid")
 
     radius_profile: tuple[float, ...] = ()
@@ -397,9 +420,13 @@ def _solve_validated_star_log_pressure(
             pressure = math.exp(float(log_pressure))
         epsilon, cs2 = map(float, eos(pressure))
         if not math.isfinite(epsilon) or epsilon <= 0.0:
-            raise EosInputError("EoS returned invalid energy density during TOV integration")
+            raise EosInputError(
+                "EoS returned invalid energy density during TOV integration"
+            )
         if not math.isfinite(cs2) or not 0.0 < cs2 <= 1.0:
-            raise EosInputError("EoS returned invalid sound speed during TOV integration")
+            raise EosInputError(
+                "EoS returned invalid sound speed during TOV integration"
+            )
         dm_dr = radius**2 * epsilon * GRAVITY_CONVERSION
         if radius <= config.center_expansion_limit_km:
             dpressure_dr = (
@@ -421,7 +448,11 @@ def _solve_validated_star_log_pressure(
                 * (mass + radius**3 * pressure * GRAVITY_CONVERSION)
                 / denominator
             )
-        if not math.isfinite(dm_dr) or not math.isfinite(dpressure_dr) or dpressure_dr >= 0.0:
+        if (
+            not math.isfinite(dm_dr)
+            or not math.isfinite(dpressure_dr)
+            or dpressure_dr >= 0.0
+        ):
             raise EosInputError("TOV derivative became invalid")
         dr_dlog_pressure = pressure / dpressure_dr
         dm_dlog_pressure = dm_dr * dr_dlog_pressure
@@ -430,8 +461,9 @@ def _solve_validated_star_log_pressure(
     def radius_limit(_log_pressure: float, state: np.ndarray) -> float:
         return float(config.radius_max_km - state[0])
 
-    radius_limit.terminal = True
-    radius_limit.direction = -1
+    radius_limit_attributes = cast(Any, radius_limit)
+    radius_limit_attributes.terminal = True
+    radius_limit_attributes.direction = -1
     log_central = math.log(central_pressure)
     log_boundary = math.log(pressure_min)
     solution = solve_ivp(
@@ -447,13 +479,25 @@ def _solve_validated_star_log_pressure(
     if solution.status != 0 or not math.isclose(
         float(solution.t[-1]), log_boundary, rel_tol=0.0, abs_tol=1.0e-12
     ):
-        raise RuntimeError(
+        if solution.status == 1:
+            raise StellarSolveError(
+                "radius_limit_reached",
+                "the EoS lower-pressure boundary was not reached before "
+                f"radius_max_km={config.radius_max_km:.12g}",
+            )
+        raise StellarSolveError(
+            "boundary_integration_failure",
             "the tabulated integration did not reach the EoS lower-pressure boundary "
-            f"(solver_status={solution.status})"
+            f"(solver_status={solution.status})",
         )
     radius = float(solution.y[0, -1])
     mass = float(solution.y[1, -1])
-    if not math.isfinite(mass) or not math.isfinite(radius) or mass <= 0.0 or radius <= 0.0:
+    if (
+        not math.isfinite(mass)
+        or not math.isfinite(radius)
+        or mass <= 0.0
+        or radius <= 0.0
+    ):
         raise RuntimeError("TOV boundary mass or radius is invalid")
 
     radius_profile: tuple[float, ...] = ()
@@ -580,22 +624,28 @@ def solve_sequence(
     pressure_min = float(eos.pressure_min_mev_fm3)
     pressure_max = float(eos.pressure_max_mev_fm3)
     if central_pressures_mev_fm3 is None:
-        if int(points) < 9:
+        if isinstance(points, bool) or not isinstance(points, int):
+            raise TypeError("points must be an integer")
+        if points < 9:
             raise ValueError("points must be at least nine")
         lower = float(np.nextafter(pressure_min, math.inf))
         if not lower < pressure_max:
             raise EosDomainError(
                 "the EoS pressure domain is too narrow to form a central-pressure sequence"
             )
-        pressures = np.geomspace(lower, pressure_max, int(points))
+        pressures = np.geomspace(lower, pressure_max, points)
     else:
         pressures = np.asarray(tuple(central_pressures_mev_fm3), dtype=float)
         if pressures.ndim != 1 or len(pressures) == 0:
-            raise ValueError("central pressures must be a non-empty one-dimensional sequence")
+            raise ValueError(
+                "central pressures must be a non-empty one-dimensional sequence"
+            )
         if not np.all(np.isfinite(pressures)) or np.any(np.diff(pressures) <= 0.0):
             raise ValueError("central pressures must be finite and strictly increasing")
         if pressures[0] <= pressure_min or pressures[-1] > pressure_max:
-            raise EosDomainError("central-pressure sequence leaves the declared EoS domain")
+            raise EosDomainError(
+                "central-pressure sequence leaves the declared EoS domain"
+            )
 
     attempts: list[SequenceAttempt] = []
     for pressure in pressures:
@@ -608,7 +658,15 @@ def solve_sequence(
                 retain_profile=False,
             )
         except (EosInputError, RuntimeError, ArithmeticError) as exc:
-            attempts.append(SequenceAttempt(candidate, "unavailable", None, str(exc)))
+            attempts.append(
+                SequenceAttempt(
+                    candidate,
+                    "unavailable",
+                    None,
+                    str(exc),
+                    getattr(exc, "reason_code", "stellar_solve_failed"),
+                )
+            )
         else:
             attempts.append(
                 SequenceAttempt(
@@ -625,7 +683,9 @@ def solve_sequence(
                     None,
                 )
             )
-    status = "complete" if all(item.star is not None for item in attempts) else "partial"
+    status = (
+        "complete" if all(item.star is not None for item in attempts) else "partial"
+    )
     return SequenceResult(
         model_name=model_name,
         attempts=tuple(attempts),
@@ -645,6 +705,7 @@ __all__ = [
     "SequenceAttempt",
     "SequenceResult",
     "StarResult",
+    "StellarSolveError",
     "StellarConfig",
     "STELLAR_VALIDATION_MODES",
     "solve_sequence",

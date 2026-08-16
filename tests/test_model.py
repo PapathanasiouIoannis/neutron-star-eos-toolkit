@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import importlib.metadata
 import io
 import json
 import tempfile
@@ -15,7 +16,6 @@ import neutron_star_eos
 from neutron_star_eos import EosInputError, EosModel, StellarConfig, open_eos
 from neutron_star_eos.cli import main as eos_tool_main
 
-
 K = 1.0e-3
 NEUTRON_MASS_MEV = 939.5651828
 
@@ -24,9 +24,9 @@ def analytical_model() -> EosModel:
     return EosModel.from_analytical(
         name="facade-polytrope",
         pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-        sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-        * K
-        * np.asarray(epsilon),
+        sound_speed_squared_from_energy_density=lambda epsilon: (
+            2.0 * K * np.asarray(epsilon)
+        ),
         energy_density_domain_mev_fm3=(1.0, 400.0),
         source="independent facade test P=K epsilon^2",
     )
@@ -88,9 +88,7 @@ def write_compose_fixture(
         ),
         "eos.yq": "2\n2\n0.0\n",
         "eos.thermo": (
-            f"{NEUTRON_MASS_MEV:.17g} 938.2718440 1\n"
-            + "\n".join(thermo_rows)
-            + "\n"
+            f"{NEUTRON_MASS_MEV:.17g} 938.2718440 1\n" + "\n".join(thermo_rows) + "\n"
         ),
     }
     archive_path = root / "compose.zip"
@@ -116,7 +114,9 @@ def file_snapshot(root: Path) -> dict[str, bytes]:
 
 
 class ModelFacadeTests(unittest.TestCase):
-    def test_root_wildcard_surface_is_small_but_advanced_names_remain_importable(self) -> None:
+    def test_root_wildcard_surface_is_small_but_advanced_names_remain_importable(
+        self,
+    ) -> None:
         self.assertEqual(
             neutron_star_eos.__all__,
             [
@@ -131,6 +131,13 @@ class ModelFacadeTests(unittest.TestCase):
         self.assertTrue(callable(neutron_star_eos.load_compose_dataset))
         self.assertTrue(callable(neutron_star_eos.interpolate_compose_thermodynamics))
         self.assertTrue(callable(neutron_star_eos.solve_star))
+
+        from neutron_star_eos.compose_dataset import REQUIRED_FILES, ComposeAxis
+        from neutron_star_eos.compose_thermodynamics import _Q_FIELDS
+
+        self.assertEqual(ComposeAxis.__name__, "ComposeAxis")
+        self.assertIn("eos.thermo", REQUIRED_FILES)
+        self.assertEqual(len(_Q_FIELDS), 7)
 
     def test_cli_help_presents_new_commands_and_validation_alias(self) -> None:
         output = io.StringIO()
@@ -168,7 +175,9 @@ class ModelFacadeTests(unittest.TestCase):
             self.assertEqual(payload["input_kind"], "csv")
             self.assertNotIn("output_directory", payload)
 
-    def test_cli_inspect_output_has_exact_bundle_and_refuses_existing_target(self) -> None:
+    def test_cli_inspect_output_has_exact_bundle_and_refuses_existing_target(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = write_csv_fixture(root)
@@ -248,7 +257,28 @@ class ModelFacadeTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             payload = json.loads(output)
             self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["reason_code"], "radius_limit_reached")
             self.assertIn("lower-pressure boundary", payload["error"])
+
+    def test_cli_domain_failure_has_a_stable_reason_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = write_csv_fixture(Path(temporary))
+            exit_code, output = run_cli(
+                [
+                    "star",
+                    str(source),
+                    "--kind",
+                    "csv",
+                    "--central-pressure-mev-fm3",
+                    "1000",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(payload["reason_code"], "eos_domain_error")
 
     def test_cli_sequence_reports_output_and_retains_all_attempt_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -280,10 +310,7 @@ class ModelFacadeTests(unittest.TestCase):
             )
             self.assertEqual(len(attempts), 9)
             self.assertTrue(
-                all(
-                    item["status"] in {"solved", "unavailable"}
-                    for item in attempts
-                )
+                all(item["status"] in {"solved", "unavailable"} for item in attempts)
             )
             self.assertEqual(
                 exit_code,
@@ -308,7 +335,9 @@ class ModelFacadeTests(unittest.TestCase):
                 [item["status"] for item in attempts],
             )
 
-    def test_analytical_and_csv_models_report_capabilities_and_solve_stars(self) -> None:
+    def test_analytical_and_csv_models_report_capabilities_and_solve_stars(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             csv_model = open_eos(
                 write_csv_fixture(Path(temporary)),
@@ -366,7 +395,9 @@ class ModelFacadeTests(unittest.TestCase):
             self.assertIsNotNone(model.native_thermodynamics)
             self.assertEqual(model.native_thermodynamics.source_rows, 6)
             self.assertIs(model.require_barotrope(), model.barotrope)
-            self.assertEqual(report.to_dict()["details"]["barotrope"]["status"], "available")
+            self.assertEqual(
+                report.to_dict()["details"]["barotrope"]["status"], "available"
+            )
 
     def test_compose_reversal_keeps_native_profile_but_blocks_barotrope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -396,9 +427,7 @@ class ModelFacadeTests(unittest.TestCase):
 
     def test_background_diagnostic_remains_reachable_through_facade(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            archive = write_compose_fixture(
-                Path(temporary), coefficient=1.0e-3
-            )
+            archive = write_compose_fixture(Path(temporary), coefficient=1.0e-3)
             model = open_eos(
                 archive,
                 kind="compose",
@@ -447,7 +476,9 @@ class ModelFacadeTests(unittest.TestCase):
                 "diagnostic_with_issues",
             )
 
-    def test_inspection_bundle_contents_are_deterministic_and_not_overwritten(self) -> None:
+    def test_inspection_bundle_contents_are_deterministic_and_not_overwritten(
+        self,
+    ) -> None:
         model = analytical_model()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -461,17 +492,26 @@ class ModelFacadeTests(unittest.TestCase):
                 tuple(sorted(path.name for path in second.iterdir())), expected_files
             )
             for name in expected_files:
-                self.assertEqual((first / name).read_bytes(), (second / name).read_bytes())
+                self.assertEqual(
+                    (first / name).read_bytes(), (second / name).read_bytes()
+                )
 
             report = json.loads((first / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["schema_version"], "eos-capability-report-v1")
             self.assertEqual(report["input_kind"], "analytical")
             self.assertEqual(report["software"]["python_implementation"], "CPython")
-            for name in ("toolkit_version", "python_version", "numpy_version", "scipy_version"):
+            for name in (
+                "toolkit_version",
+                "python_version",
+                "numpy_version",
+                "scipy_version",
+            ):
                 self.assertTrue(report["software"][name])
-            header = (first / "thermodynamics.csv").read_text(
-                encoding="utf-8"
-            ).splitlines()[0]
+            header = (
+                (first / "thermodynamics.csv")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
             self.assertEqual(
                 header,
                 "energy_density_mev_fm3,pressure_mev_fm3,sound_speed_squared",
@@ -519,6 +559,26 @@ class ModelFacadeTests(unittest.TestCase):
                 first.write_star(root / "star", star)
             with self.assertRaisesRegex(EosInputError, "does not belong"):
                 first.write_sequence(root / "sequence", sequence)
+
+            from neutron_star_eos.output import write_sequence, write_star
+
+            with self.assertRaisesRegex(EosInputError, "does not belong"):
+                write_star(first, root / "star", star)
+            with self.assertRaisesRegex(EosInputError, "does not belong"):
+                write_sequence(first, root / "sequence", sequence)
+            self.assertFalse((root / "star").exists())
+            self.assertFalse((root / "sequence").exists())
+
+    def test_stellar_bundle_rejects_the_wrong_result_type(self) -> None:
+        model = analytical_model()
+        star = model.solve_star(100.0)
+        sequence = model.solve_sequence((50.0, 100.0, 150.0))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(EosInputError, "StarResult"):
+                model.write_star(root / "star", sequence)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(EosInputError, "SequenceResult"):
+                model.write_sequence(root / "sequence", star)  # type: ignore[arg-type]
             self.assertFalse((root / "star").exists())
             self.assertFalse((root / "sequence").exists())
 
@@ -533,11 +593,10 @@ class ModelFacadeTests(unittest.TestCase):
 
         second = EosModel.from_analytical(
             name="facade-polytrope",
-            pressure_from_energy_density=lambda epsilon: K
-            * np.asarray(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-            * K
-            * np.asarray(epsilon),
+            pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                2.0 * K * np.asarray(epsilon)
+            ),
             energy_density_from_pressure=perturbed_inverse,
             energy_density_domain_mev_fm3=(lower, upper),
             source="independent facade test P=K epsilon^2",
@@ -583,12 +642,11 @@ class ModelFacadeTests(unittest.TestCase):
             ("unavailable", "solved", "solved"),
         )
         self.assertIsNotNone(sequence.attempts[0].reason)
+        self.assertEqual(sequence.attempts[0].reason_code, "radius_limit_reached")
 
         with tempfile.TemporaryDirectory() as temporary:
             output = model.write_sequence(Path(temporary) / "sequence", sequence)
-            payload = json.loads(
-                (output / "sequence.json").read_text(encoding="utf-8")
-            )
+            payload = json.loads((output / "sequence.json").read_text(encoding="utf-8"))
             self.assertEqual(len(payload["attempts"]), len(pressures))
             self.assertEqual(payload["solver_config"]["radius_max_km"], 23.0)
             self.assertEqual(
@@ -597,6 +655,9 @@ class ModelFacadeTests(unittest.TestCase):
             )
             self.assertIsNone(payload["attempts"][0]["star"])
             self.assertIsNotNone(payload["attempts"][0]["reason"])
+            self.assertEqual(
+                payload["attempts"][0]["reason_code"], "radius_limit_reached"
+            )
 
             with (output / "sequence.csv").open(
                 "r", encoding="utf-8", newline=""
@@ -612,9 +673,38 @@ class ModelFacadeTests(unittest.TestCase):
                 [attempt.status for attempt in sequence.attempts],
             )
             self.assertTrue(rows[0]["reason"])
+            self.assertEqual(rows[0]["reason_code"], "radius_limit_reached")
             self.assertEqual(rows[0]["mass_msun"], "")
             self.assertTrue(rows[1]["mass_msun"])
             self.assertTrue(rows[2]["mass_msun"])
+
+    def test_thermodynamic_view_distinguishes_nodes_and_evaluated_curve(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = open_eos(write_csv_fixture(Path(temporary)), kind="csv")
+            view = model.thermodynamics(curve_points=33)
+        self.assertEqual(view.roles, ("source_nodes", "continuous_barotrope"))
+        source = view.series_for("source_nodes")
+        curve = view.series_for("continuous_barotrope")
+        self.assertEqual(source.rows, 65)
+        self.assertEqual(curve.rows, 33)
+        self.assertFalse(source.column("pressure_mev_fm3").flags.writeable)
+        self.assertEqual(curve.units["sound_speed_squared"], "dimensionless")
+        with self.assertRaises(ValueError):
+            source.column("pressure_mev_fm3")[0] = 0.0
+        with self.assertRaises(TypeError):
+            model.thermodynamics(curve_points=33.0)  # type: ignore[arg-type]
+
+    def test_cli_version_uses_package_version(self) -> None:
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            eos_tool_main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        installed = importlib.metadata.version("neutron-star-eos-toolkit")
+        self.assertEqual(neutron_star_eos.__version__, installed)
+        self.assertEqual(output.getvalue().strip(), f"eos-tool {installed}")
 
 
 if __name__ == "__main__":
