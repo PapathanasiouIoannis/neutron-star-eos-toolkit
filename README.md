@@ -18,6 +18,15 @@ even when it cannot be reduced to one continuous stellar barotrope.
 
 Python 3.12 is the verified runtime.
 
+The shortest development setup installs the package, plots, and notebook
+kernel together:
+
+```powershell
+uv sync --all-extras
+```
+
+If you do not use `uv`, a conventional virtual environment also works:
+
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
@@ -32,12 +41,18 @@ python3.12 -m venv .venv
 
 ## Interactive experiments
 
-Install the optional notebook tools and open the guided experiment:
+Register the project environment as a named Jupyter kernel, then open the
+guided experiment:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[notebook]"
-.\.venv\Scripts\jupyter-lab.exe .\notebooks\eos_experiments.ipynb
+uv run python -m ipykernel install --user --name neutron-star-eos-toolkit `
+  --display-name "Python (neutron-star-eos-toolkit)"
+uv run jupyter lab .\notebooks\eos_experiments.ipynb
 ```
+
+In VS Code, select **Python (neutron-star-eos-toolkit)** in the notebook's
+kernel picker. If `import neutron_star_eos` fails, the notebook is using a
+different Python environment.
 
 The notebook runs with the supplied CSV by default. It can also load a user
 CSV, a CompOSE source, or the editable analytical definition in
@@ -52,6 +67,30 @@ downloads and independently TOV-integrates eight core EoSs plus one hybrid
 stress test. It writes every plot to a separate PNG and cross-checks calculated
 curves against optional `eos.mr` references, current CompOSE catalogue values,
 and convention-aware primary literature.
+
+## Beginner workflows
+
+The [`workflows/`](workflows) directory contains six short, editable scripts.
+Each has one obvious parameter block and reads from top to bottom:
+
+```text
+analytical_eos.py               define P(epsilon)
+csv_eos.py                      load a CSV table
+compose_eos.py                  load one downloaded CompOSE archive
+calculate_one_star.py           integrate one TOV model
+calculate_mass_radius.py        calculate and plot a sequence
+compare_equations_of_state.py   compare two calculated sequences
+```
+
+For example:
+
+```powershell
+uv run python workflows\calculate_one_star.py
+```
+
+Use these scripts when you want an editable calculation without notebook or
+command-line abstraction. Use the notebook when you want explanations and
+plots beside each step.
 
 ## First command
 
@@ -105,16 +144,30 @@ epsilon_mev_fm3,pressure_mev_fm3
 import numpy as np
 from neutron_star_eos import EosModel
 
-K = 1.0e-3
+
+def pressure(energy_density):
+    epsilon = np.asarray(energy_density)
+    return 1.0e-3 * epsilon**2
+
+
+def sound_speed_squared(energy_density):
+    epsilon = np.asarray(energy_density)
+    return 2.0e-3 * epsilon
+
+
 model = EosModel.from_analytical(
-    name="example-polytrope",
-    pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-    sound_speed_squared_from_energy_density=lambda epsilon: 2 * K * np.asarray(epsilon),
+    name="example-analytical-eos",
+    pressure_from_energy_density=pressure,
+    sound_speed_squared_from_energy_density=sound_speed_squared,
     energy_density_domain_mev_fm3=(1.0, 400.0),
     source="educational example",
 )
 print(model.summary())
 ```
+
+The quadratic is only a runnable example. The interface accepts the complete
+analytical function `P(epsilon)` you provide; it does not require `K`, `gamma`,
+or any particular parameterization.
 
 The report fingerprints evaluated pressure and sound-speed values on a
 declared 2049-point grid and the recovered energy density on 129 corresponding
@@ -230,6 +283,7 @@ two-fluid dark-matter stars are outside this release and remain unavailable.
 ```text
 src/neutron_star_eos/  public package
 examples/              one runnable example per input type
+workflows/             short task-oriented calculations for beginners
 notebooks/             guided experiments and editable analytical definition
 experiments/           pinned, reproducible research campaigns
 docs/                  concise architecture and CompOSE guidance

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from numpy.polynomial import Polynomial
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
@@ -28,11 +27,12 @@ from neutron_star_eos.eos import (
     EOS_INPUT_SCHEMA_VERSION,
     EosDomainError,
     EosInputError,
-    EosValidationIssue,
     EosValidationReport,
     _domain_values,
     _scalar_or_array,
 )
+
+from .validation import validate_compose_interpolant
 
 COMPOSE_BAROTROPE_SCHEMA_VERSION = "compose_native_density_barotrope_v2"
 COMPOSE_INTERPOLATION_POLICY = "separate_log_pchip_in_native_baryon_density_v1"
@@ -340,112 +340,14 @@ class ComposeEos:
         cs2 = float(self._cs2_from_log_density(log_density))
         return epsilon, cs2
 
-    def _validation_log_density(self, points: int) -> np.ndarray:
-        intervals = len(self._log_density) - 1
-        points_per_interval = max(9, int(np.ceil((int(points) - 1) / intervals)))
-        candidates: list[float] = []
-        pressure_coefficients = self._pressure_from_density.c
-        epsilon_coefficients = self._epsilon_from_density.c
-        for index in range(intervals):
-            left = float(self._log_density[index])
-            right = float(self._log_density[index + 1])
-            width = right - left
-            candidates.extend(
-                float(value)
-                for value in np.linspace(
-                    left, right, points_per_interval, endpoint=False
-                )
-            )
-            fp_cubic, fp_quadratic, fp_linear, fp_constant = pressure_coefficients[
-                :, index
-            ]
-            ep_cubic, ep_quadratic, ep_linear, ep_constant = epsilon_coefficients[
-                :, index
-            ]
-            log_pressure = Polynomial((fp_constant, fp_linear, fp_quadratic, fp_cubic))
-            log_epsilon = Polynomial((ep_constant, ep_linear, ep_quadratic, ep_cubic))
-            pressure_derivative = log_pressure.deriv()
-            epsilon_derivative = log_epsilon.deriv()
-            cs2_stationarity = (
-                (pressure_derivative - epsilon_derivative)
-                * pressure_derivative
-                * epsilon_derivative
-                + pressure_derivative.deriv() * epsilon_derivative
-                - epsilon_derivative.deriv() * pressure_derivative
-            )
-            endpoint_tolerance = (
-                64.0 * np.finfo(float).eps * max(1.0, abs(left), abs(right), width)
-            )
-            for polynomial in (
-                pressure_derivative,
-                epsilon_derivative,
-                cs2_stationarity,
-            ):
-                for root in polynomial.roots():
-                    if abs(float(np.imag(root))) > 1.0e-10:
-                        continue
-                    local = float(np.real(root))
-                    if -endpoint_tolerance <= local <= width + endpoint_tolerance:
-                        if abs(local) <= endpoint_tolerance:
-                            candidates.append(left)
-                        elif abs(local - width) <= endpoint_tolerance:
-                            candidates.append(right)
-                        else:
-                            candidates.append(left + local)
-        candidates.append(float(self._log_density[-1]))
-        return np.unique(np.asarray(candidates, dtype=float))
-
     def validate(self, *, points: int = 2049) -> EosValidationReport:
-        if int(points) < 17:
-            raise ValueError("validation points must be at least 17")
-        log_density = self._validation_log_density(int(points))
-        pressure = np.exp(self._pressure_from_density(log_density))
-        epsilon = np.exp(self._epsilon_from_density(log_density))
-        cs2 = self._cs2_from_log_density(log_density)
-        issues: list[EosValidationIssue] = []
-        if (
-            np.any(~np.isfinite(pressure))
-            or np.any(~np.isfinite(epsilon))
-            or np.any(~np.isfinite(cs2))
-        ):
-            issues.append(
-                EosValidationIssue(
-                    "nonfinite",
-                    "interpolated pressure, energy density, or cs2 is nonfinite",
-                )
-            )
-        if np.any(pressure <= 0.0) or np.any(epsilon <= 0.0):
-            issues.append(
-                EosValidationIssue(
-                    "nonpositive_thermodynamics",
-                    "pressure and total energy density must remain positive",
-                )
-            )
-        if np.any(np.diff(pressure) <= 0.0) or np.any(np.diff(epsilon) <= 0.0):
-            issues.append(
-                EosValidationIssue(
-                    "nonmonotone_native_interpolation",
-                    "native-density interpolation must remain strictly invertible",
-                )
-            )
-        if np.any(cs2 <= 0.0):
-            issues.append(
-                EosValidationIssue(
-                    "mechanical_instability", "dP/dE must remain positive"
-                )
-            )
-        if np.any(cs2 > 1.0):
-            issues.append(EosValidationIssue("acausal", "dP/dE must not exceed one"))
-        return EosValidationReport(
+        return validate_compose_interpolant(
             model_name=self.model_name,
-            assessed_points=len(log_density),
-            pressure_min_mev_fm3=float(np.min(pressure)),
-            pressure_max_mev_fm3=float(np.max(pressure)),
-            energy_density_min_mev_fm3=float(np.min(epsilon)),
-            energy_density_max_mev_fm3=float(np.max(epsilon)),
-            cs2_min=float(np.min(cs2)),
-            cs2_max=float(np.max(cs2)),
-            issues=tuple(issues),
+            log_baryon_density=self._log_density,
+            log_pressure_interpolant=self._pressure_from_density,
+            log_energy_density_interpolant=self._epsilon_from_density,
+            sound_speed_squared=self._cs2_from_log_density,
+            points=points,
         )
 
     def provenance(self) -> dict[str, Any]:
@@ -521,62 +423,17 @@ def build_compose_eos(
     baryon_density_max_fm3: float | None = None,
     ordering_policy: str = "strict",
 ) -> ComposeEos:
-    """Construct one explicitly selected continuous CompOSE barotrope.
+    """Compatibility wrapper for :func:`compose.construction.build_compose_eos`."""
 
-    ``strict`` preserves the historical fail-closed behavior.  The explicit
-    The diagnostic policies remove no ambiguity silently: they keep source
-    values unchanged, choose the earlier or later member of a local ordering
-    conflict, and record every omitted source position in provenance. Their
-    separation is a sensitivity measure, not a physical seam/transition model.
-    """
+    from .construction import build_compose_eos as _build_compose_eos
 
-    if isinstance(dataset_or_slice, ComposeDataset):
-        cold_slice = dataset_or_slice.cold_beta_equilibrium_slice(
-            matter=matter,
-            includes_leptons=includes_leptons,
-        )
-    elif isinstance(dataset_or_slice, ComposeColdSlice):
-        cold_slice = dataset_or_slice
-    else:
-        raise TypeError("build_compose_eos expects ComposeDataset or ComposeColdSlice")
-    if ordering_policy not in COMPOSE_ORDERING_POLICIES:
-        raise EosInputError(
-            f"ordering_policy must be one of {COMPOSE_ORDERING_POLICIES}"
-        )
-    source_slice_report = cold_slice.report()
-    selected_source = cold_slice.selected_domain(
+    return _build_compose_eos(
+        dataset_or_slice,
+        matter=matter,
+        includes_leptons=includes_leptons,
         baryon_density_min_fm3=baryon_density_min_fm3,
         baryon_density_max_fm3=baryon_density_max_fm3,
-    )
-    selected = selected_source
-    if ordering_policy == "diagnostic_monotone_subsequence":
-        selected = selected_source.diagnostic_monotone_subsequence(
-            conflict_policy="keep_first"
-        )
-    elif ordering_policy == "diagnostic_keep_later_monotone_subsequence":
-        selected = selected_source.diagnostic_monotone_subsequence(
-            conflict_policy="keep_later"
-        )
-    retained_positions = set(selected.source_positions)
-    omitted_positions = tuple(
-        position
-        for position in selected_source.source_positions
-        if position not in retained_positions
-    )
-    return ComposeEos(
-        cold_slice=selected,
-        source_slice_report=source_slice_report,
-        selection={
-            "requested_baryon_density_min_fm3": baryon_density_min_fm3,
-            "requested_baryon_density_max_fm3": baryon_density_max_fm3,
-            "last_retained_source_node_fm3": float(selected.baryon_density_fm3[-1]),
-            "ordering_policy": ordering_policy,
-            "selected_source_rows_before_ordering_policy": len(selected_source.rows),
-            "retained_source_positions": list(selected.source_positions),
-            "omitted_source_positions": list(omitted_positions),
-            "omitted_source_rows": len(omitted_positions),
-            "diagnostic_reduction_is_physical_transition_policy": False,
-        },
+        ordering_policy=ordering_policy,
     )
 
 
@@ -591,19 +448,14 @@ def load_compose_eos(
     baryon_density_max_fm3: float | None = None,
     ordering_policy: str = "strict",
 ) -> ComposeEos:
-    """Compatibility wrapper: parse a dataset, then build a continuous barotrope."""
+    """Compatibility wrapper for :func:`compose.construction.load_compose_eos`."""
 
-    if matter != "cold_beta_equilibrated":
-        raise EosInputError(
-            "v2 stellar CompOSE input must explicitly be cold beta-equilibrated matter"
-        )
-    if includes_leptons is not True:
-        raise EosInputError("v2 stellar CompOSE input must explicitly include leptons")
-    dataset = load_compose_dataset(
-        path_or_zip, model_id=model_id, source_url=source_url
-    )
-    return build_compose_eos(
-        dataset,
+    from .construction import load_compose_eos as _load_compose_eos
+
+    return _load_compose_eos(
+        path_or_zip,
+        model_id=model_id,
+        source_url=source_url,
         matter=matter,
         includes_leptons=includes_leptons,
         baryon_density_min_fm3=baryon_density_min_fm3,

@@ -9,9 +9,8 @@ from neutron_star_eos.compose.barotrope import (
     COMPOSE_INTERPOLATION_POLICY,
     COMPOSE_ORDERING_POLICIES,
     ComposeEos,
-    build_compose_eos,
-    load_compose_eos,
 )
+from neutron_star_eos.compose.construction import build_compose_eos, load_compose_eos
 from neutron_star_eos.compose.dataset import (
     COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
     COMPOSE_DATASET_SCHEMA_VERSION,

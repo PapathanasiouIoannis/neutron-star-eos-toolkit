@@ -2,6 +2,12 @@
 
 from neutron_star_eos._version import __version__
 from neutron_star_eos.analytical import AnalyticalEos
+from neutron_star_eos.api import (
+    Capability,
+    CapabilityReport,
+    EosModel,
+    open_eos,
+)
 from neutron_star_eos.compose import (
     COMPOSE_ORDERING_POLICIES,
     ComposeColdSlice,
@@ -27,12 +33,6 @@ from neutron_star_eos.eos import (
     EosValidationIssue,
     EosValidationReport,
     validate_eos,
-)
-from neutron_star_eos.model import (
-    Capability,
-    CapabilityReport,
-    EosModel,
-    open_eos,
 )
 from neutron_star_eos.stellar import (
     BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES,

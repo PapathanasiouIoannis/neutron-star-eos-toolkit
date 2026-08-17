@@ -38,6 +38,8 @@ tagged as a supported release.
   interface.
 - Contribution, security, diagnostics, parameter, plotting, and
   reproducibility guidance, together with reproducible Python 3.12 constraints.
+- Six short, task-oriented beginner workflows for analytical, CSV, CompOSE,
+  one-star, mass-radius, and EoS-comparison experiments.
 
 ### Changed
 
@@ -51,6 +53,13 @@ tagged as a supported release.
 - The TOV unit conversions now retain the precision implied by the CompOSE
   v3.01 constants table, and every stellar result records those constants and
   their authority for reproducibility.
+- The library and CompOSE campaign are organized by physical responsibility:
+  EoS validation, source reading, interpolation, TOV integration, sequences,
+  plotting, output, comparison, acceptance, and reporting now have focused
+  modules while historical imports remain compatible.
+- The experiment notebook now begins with essential physical parameters and
+  progressively discloses domain checks, validation, TOV calculations,
+  advanced controls, saving, and local-kernel setup.
 
 ### Release status
 

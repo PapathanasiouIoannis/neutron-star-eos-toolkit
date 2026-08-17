@@ -1,84 +1,123 @@
-# Architecture
+# Physics-first architecture
 
-The package has one beginner-facing workflow and three source-specific input
-paths. Source-specific physics stays separate until an input can legitimately
-provide the common continuous-barotrope contract.
+The repository is organized by scientific task. A physics student should be
+able to find an equation, source-selection rule, interpolation, or plot by its
+physical name rather than by knowing the software design first.
 
 ```text
-Analytical functions -> analytical assessment --\
-Ordinary CSV table  -> tabulated assessment -----+-> continuous barotrope -> stars
-CompOSE source      -> native-Q thermodynamics --/
-                                  |
-                                  +-> may remain useful without a barotrope
+source data -> source-specific validation -> continuous cold barotrope
+                                                   |
+                                                   v
+                                   TOV equations -> one star -> sequence
 ```
 
-## Public workflow
+CompOSE native thermodynamics can remain useful even when the source cannot be
+reduced to one continuous stellar barotrope.
 
-`model.py` provides `open_eos`, `EosModel`, the capability report, and a
-read-only thermodynamic presentation view. It coordinates existing scientific
-objects; it does not give different source types a shared interpolation policy.
+## Start here
+
+- `workflows/`: short scripts with one visible parameter section.
+- `notebooks/eos_experiments.ipynb`: guided experiment with progressive detail.
+- `api.py`: the intentionally small Python entry surface.
+- `model.py`: the thin loaded-model handle used by both routes.
+
+The usual workflow is deliberately short:
 
 ```python
-model = open_eos(path, kind="csv")
-print(model.summary())
-barotrope = model.require_barotrope()
+from neutron_star_eos import open_eos
+
+model = open_eos("my_eos.csv", kind="csv")
 star = model.solve_star(central_pressure_mev_fm3=100.0)
+sequence = model.solve_sequence((40.0, 60.0, 100.0, 150.0))
 ```
 
-Advanced users can still import the lower-level adapters directly from their
-modules.
+## Equation-of-state modules
 
-## Source-file responsibilities
-
-| File | Responsibility |
+| Module | One scientific responsibility |
 |---|---|
-| `model.py` | High-level loading, capabilities, orchestration, and thermodynamic views |
-| `output.py` | Deterministic, non-overwriting inspection and stellar bundles |
-| `thermodynamics.py` | Read-only source/native/barotrope presentation contracts |
-| `eos.py` | Common continuous-barotrope contract, validation reports, and errors |
-| `analytical.py` | Focused analytical-adapter import and compatibility boundary |
-| `tabulated.py` | Ordinary CSV/array barotropes and their fixed interpolation policy |
-| `compose/dataset.py` | Lossless CompOSE parsing, hashes, cold-slice selection, and source diagnostics |
-| `compose/thermodynamics.py` | Native-Q interpolation and reconstructed thermodynamic quantities |
-| `compose/barotrope.py` | Optional continuous CompOSE barotrope for stellar backgrounds |
-| `plotting.py` | Optional presentation of already-loaded data and computed results |
-| `stellar.py` | Continuous source-boundary TOV stars and sequences |
-| `cli.py` | Argument parsing and display; scientific orchestration delegates to `model.py` |
-| `__init__.py` | Stable beginner imports plus retained advanced compatibility imports |
+| `eos/core.py` | Common cold-barotrope contract, units, domains, and provenance identity |
+| `eos/analytical.py` | User-supplied analytical `P(epsilon)` and `dP/d(epsilon)` |
+| `eos/tabulated.py` | Ordinary CSV nodes and their declared interpolation policy |
+| `eos/validation.py` | Positivity, monotonicity, stability, and causality assessment |
+| `loading.py` | Source-specific loading into an `EosModel` |
+| `capabilities.py` | Plain-language report of operations that are available |
+| `thermodynamic_view.py` | Read-only source and continuous series used by plots |
 
-The three CompOSE layers form one subpackage but remain intentionally separate. Combining them would
-hide the important case in which source parsing and native thermodynamics
-succeed while a continuous pressure-energy-density reduction is unavailable.
+Top-level `analytical.py`, `tabulated.py`, and the former import names remain
+small compatibility boundaries for existing user scripts.
 
-## Dependency direction
+## CompOSE modules
+
+| Module | One scientific responsibility |
+|---|---|
+| `compose/reader.py` | Lossless parsing, archive members, axes, and row records |
+| `compose/cold_slice.py` | Explicit cold beta-equilibrium path and density selection |
+| `compose/records.py` | Immutable source records and diagnostic report types |
+| `compose/profile.py` | Read-only native thermodynamic profile returned to users |
+| `compose/optional_fields.py` | Composition, microscopic, and phase fields when supplied |
+| `compose/thermodynamics.py` | Native-Q interpolation and reconstructed quantities |
+| `compose/diagnostics.py` | Named residual calculations; never source repair |
+| `compose/barotrope.py` | Continuous `P(nB)` and `epsilon(nB)` interpolation |
+| `compose/validation.py` | Assessment of the continuous CompOSE interpolant |
+| `compose/construction.py` | Explicit ordering/density policy and barotrope construction |
+| `compose/mass_radius.py` | Independent `eos.mr` reference reader, never solver input |
+
+`compose/dataset.py` is now only a compatibility re-export. This separation
+keeps parsing, native thermodynamics, and the optional stellar reduction visibly
+different.
+
+## Stellar modules
+
+| Module | Physical calculation |
+|---|---|
+| `stellar/constants.py` | Physical constants and unit conversions with authority |
+| `stellar/configuration.py` | Solver tolerances and integration-domain settings |
+| `stellar/tov.py` | The TOV differential equations and radial integration |
+| `stellar/star.py` | Validation plus orchestration of one stellar background |
+| `stellar/sequence.py` | Repeated one-star calculations over central pressure |
+| `stellar/results.py` | Star, sequence, attempt, and diagnostic result records |
+
+If you want to read the actual relativistic stellar equations, begin with
+`stellar/tov.py`. No facade, plotting, output, or campaign code changes those
+equations.
+
+## Plotting and output
+
+| Module | Responsibility |
+|---|---|
+| `plotting/eos.py` | Pressure-energy and sound-speed plots |
+| `plotting/compose.py` | CompOSE residual, composition, and phase plots |
+| `plotting/stellar.py` | Profiles, sequence status, and mass-radius plots |
+| `plotting/common.py` | Shared style and axes helpers only |
+| `output/metadata.py` | JSON reports and human model summaries |
+| `output/tables.py` | Thermodynamic and sequence CSV tables |
+| `output/bundles.py` | Atomic, non-overwriting result directories |
+
+Plotting receives existing data or results. It does not run a solver, repair an
+EoS, or save unless the caller explicitly asks.
+
+## CompOSE comparison campaign
+
+The research campaign follows the same physical order:
 
 ```text
-eos.py
-├── analytical.py
-├── tabulated.py
-├── compose/dataset.py
-│   ├── compose/thermodynamics.py
-│   └── compose/barotrope.py
-└── stellar.py
-
-model.py -> all workflow layers
-output.py -> model/result presentation contracts
-plotting.py -> thermodynamic views and existing results
-cli.py   -> model.py
+config.py -> acquire.py -> sampling.py -> calculate.py -> compare.py
+                                                |
+                                                v
+                       acceptance.py -> figures.py -> report.py/provenance.py
 ```
 
-Scientific modules never import the facade or CLI. This keeps the low-level
-calculations independently testable and prevents circular dependencies.
+`experiments/compose_comparison/run.py` is a short command entry point.
+`campaign.py` runs one model and `campaign_cli.py` coordinates the selected
+models. Optional `eos.mr` data enter only through `reference.py`, after the TOV
+calculation.
 
 ## Invariants
 
-- Units and energy-density conventions are explicit.
-- No input is silently sorted, clipped, repaired, smoothed, or extrapolated.
-- CompOSE native thermodynamics does not require a stellar barotrope.
+- Units and total-energy-density conventions are explicit.
+- Inputs are never silently sorted, clipped, repaired, smoothed, or extrapolated.
 - A numerical seam is not automatically labelled a physical transition.
-- Every sequence request retains a success or an explicit failure reason.
+- Every sequence request retains a solution or an explicit failure reason.
 - A positive-pressure source boundary is not called a vacuum surface.
-- Unavailable tides, stability, turning points, and maximum masses are never
-  inferred from a background sequence.
-- Public tests use synthetic fixtures; private external validation data does
-  not enter this repository.
+- Tidal observables, stability, turning points, and maximum masses are not
+  inferred by the background solver.
