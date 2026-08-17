@@ -46,6 +46,13 @@ the authoritative user function `P(epsilon)` and its consistent
 `dP/d(epsilon)`; the notebook handles inspection, plots, stellar calculations,
 and provenance.
 
+For a pinned, reproducible research example, the
+[cold CompOSE comparison campaign](experiments/compose_comparison/README.md)
+downloads and independently TOV-integrates eight core EoSs plus one hybrid
+stress test. It writes every plot to a separate PNG and cross-checks calculated
+curves against optional `eos.mr` references, current CompOSE catalogue values,
+and convention-aware primary literature.
+
 ## First command
 
 Inspect the supplied CSV without running a stellar solver or writing files:
@@ -137,6 +144,11 @@ barotrope are separate layers. A pressure reversal can make
 with diagnostics. See [the CompOSE guide](docs/compose.md) for the native
 quantities, density selection, and diagnostic ordering policies.
 
+`ComposeEos.pressure_from_baryon_density(...)` and
+`ComposeEos.baryon_density_from_pressure(...)` expose the declared native
+density coordinate without extrapolation, which is useful for controlled
+central-density experiments.
+
 ## Plotting
 
 Plotting is optional and never runs a solver, repairs data, or writes files:
@@ -186,7 +198,8 @@ pressure domain; an explicit `--points` value must be at least 9.
 
 Reports record the toolkit, Python, NumPy, and SciPy versions. Stellar JSON
 also records the exact ODE settings, validation mode, EoS provenance identity,
-source-boundary status, and any retained radial profile.
+source-boundary status, physical conversion constants and their authority, and
+any retained radial profile.
 
 The original `eos-tool validate csv|compose` syntax remains as a compatibility
 alias for existing scripts.
@@ -218,14 +231,15 @@ two-fluid dark-matter stars are outside this release and remain unavailable.
 src/neutron_star_eos/  public package
 examples/              one runnable example per input type
 notebooks/             guided experiments and editable analytical definition
+experiments/           pinned, reproducible research campaigns
 docs/                  concise architecture and CompOSE guidance
 tests/                 synthetic interface and solver tests
 ```
 
 See [the architecture map](docs/architecture.md) for the responsibility of
-every source file. The repository deliberately contains no downloaded
-CompOSE tables, research campaigns, manuscripts, validation packets, or
-publication figures.
+every source file. Downloaded CompOSE archives and generated campaign data and
+figures remain local and ignored; the tracked campaign registry contains only
+source URLs, hashes, benchmark metadata, and reproducible code.
 
 ## Development
 
@@ -240,5 +254,4 @@ The [parameter reference](docs/parameters.md),
 used by the CLI and notebook. See [CONTRIBUTING.md](CONTRIBUTING.md) before
 changing scientific behavior.
 
-This is currently a private pre-release. A software licence must be selected
-before public redistribution.
+This project is distributed under the [MIT License](LICENSE).

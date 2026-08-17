@@ -119,6 +119,8 @@ class ComposeEos:
         self.energy_density_max_mev_fm3 = float(epsilon[-1])
         self.pressure_min_mev_fm3 = float(pressure[0])
         self.pressure_max_mev_fm3 = float(pressure[-1])
+        self.baryon_density_min_fm3 = float(density[0])
+        self.baryon_density_max_fm3 = float(density[-1])
         self._log_density = np.log(density)
         self._log_pressure = np.log(pressure)
         self._log_epsilon = np.log(epsilon)
@@ -217,6 +219,58 @@ class ComposeEos:
         dlog_epsilon = np.asarray(self._dlog_epsilon(log_density), dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
             return pressure * dlog_pressure / (epsilon * dlog_epsilon)
+
+    def pressure_from_baryon_density(self, baryon_density_fm3: Any) -> Any:
+        """Evaluate pressure on the declared native-density domain."""
+
+        values, scalar = _domain_values(
+            baryon_density_fm3,
+            name="baryon_density_fm3",
+            lower=self.baryon_density_min_fm3,
+            upper=self.baryon_density_max_fm3,
+        )
+        result = np.exp(self._pressure_from_density(np.log(values)))
+        result = np.where(
+            values == self.baryon_density_min_fm3,
+            self.pressure_min_mev_fm3,
+            result,
+        )
+        result = np.where(
+            values == self.baryon_density_max_fm3,
+            self.pressure_max_mev_fm3,
+            result,
+        )
+        if not np.all(np.isfinite(result)):
+            raise EosDomainError(
+                "CompOSE interpolation left the selected baryon-density domain"
+            )
+        return _scalar_or_array(result, scalar)
+
+    def baryon_density_from_pressure(self, pressure_mev_fm3: Any) -> Any:
+        """Invert pressure to native baryon density without extrapolation."""
+
+        values, scalar = _domain_values(
+            pressure_mev_fm3,
+            name="pressure_mev_fm3",
+            lower=self.pressure_min_mev_fm3,
+            upper=self.pressure_max_mev_fm3,
+        )
+        result = np.exp(self._log_density_from_pressure(values))
+        result = np.where(
+            values == self.pressure_min_mev_fm3,
+            self.baryon_density_min_fm3,
+            result,
+        )
+        result = np.where(
+            values == self.pressure_max_mev_fm3,
+            self.baryon_density_max_fm3,
+            result,
+        )
+        if not np.all(np.isfinite(result)):
+            raise EosDomainError(
+                "CompOSE interpolation left the selected pressure domain"
+            )
+        return _scalar_or_array(result, scalar)
 
     def pressure_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
         values, scalar = _domain_values(

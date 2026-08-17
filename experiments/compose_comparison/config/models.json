@@ -1,0 +1,488 @@
+{
+  "schema_version": "compose-comparison-model-registry-v1",
+  "campaign": {
+    "name": "Cold CompOSE mass-radius comparison",
+    "core_models": 8,
+    "stress_models": 1,
+    "archive_filename": "archive.zip",
+    "required_archive_members": [
+      "eos.t",
+      "eos.nb",
+      "eos.yq",
+      "eos.thermo"
+    ],
+    "source_policy": "Stable Zenodo record downloads are authoritative for acquisition; current CompOSE pages and data sheets are authoritative for model identity and catalogue benchmarks.",
+    "reference_policy": "eos.mr is an independent comparison source and is never TOV solver input.",
+    "surface_policy": "Toolkit radii stop at the lowest retained positive source pressure and must not be relabelled as P=0 radii."
+  },
+  "models": [
+    {
+      "slug": "bsk26",
+      "role": "core",
+      "model_id": "PCP(BSk26)",
+      "compose_eos_id": 258,
+      "compose_page_url": "https://compose.obspm.fr/eos/258",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14509180/files/PCP_BSK26_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14509180",
+        "bytes": 186638,
+        "sha256": "21f8cb9ea5b3ba12538b672fb69f2ccdd8624f4b46ec174e3d70b05cc8a2266b"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": true
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.17,
+        "radius_at_maximum_mass_km": 10.2,
+        "radius_at_1_4_msun_km": 11.77,
+        "source_url": "https://compose.obspm.fr/eos/258"
+      },
+      "primary_citations": [
+        {
+          "label": "Pearson et al. (2018), unified BSk equations of state",
+          "url": "https://academic.oup.com/mnras/article/481/3/2994/5090419"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "like_for_like",
+        "source_label": "Pearson et al. (2018), Tables 16 and 17",
+        "source_url": "https://academic.oup.com/mnras/article/481/3/2994/5090419",
+        "maximum_mass_msun": 2.17,
+        "radius_at_maximum_mass_km": 10.2,
+        "radius_at_1_4_msun_km": 11.77,
+        "notes": [
+          "The paper's hydrostatic peak is beyond its stated causal limit; compare the causal endpoint separately."
+        ]
+      },
+      "ordering_analysis": {
+        "analysis_policy": "diagnostic_monotone_subsequence",
+        "sensitivity_policies": [
+          "diagnostic_monotone_subsequence",
+          "diagnostic_keep_later_monotone_subsequence"
+        ],
+        "expected_pressure_issues": [
+          {
+            "left_position": 274,
+            "right_position": 275,
+            "left_baryon_density_fm3": 0.0735125,
+            "right_baryon_density_fm3": 0.073586,
+            "relative_change": -0.00036988029953344726
+          }
+        ]
+      },
+      "analysis_notes": [
+        "The tabulated hydrostatic maximum is slightly beyond the causal domain.",
+        "Report the causal endpoint separately from the hydrostatic peak.",
+        "A local source pressure reversal requires explicit keep-first and keep-later sensitivity runs; never silently repair it."
+      ]
+    },
+    {
+      "slug": "sly4",
+      "role": "core",
+      "model_id": "RG(SLy4)",
+      "compose_eos_id": 134,
+      "compose_page_url": "https://compose.obspm.fr/eos/134",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14808591/files/RG_SLY4_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14808591",
+        "bytes": 128340,
+        "sha256": "2993201b8b674b4d8ffe0021c35f2f34b266fe727954e4c8cc60aba542769419"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.06,
+        "radius_at_maximum_mass_km": 10.02,
+        "radius_at_1_4_msun_km": 11.7,
+        "source_url": "https://compose.obspm.fr/eos/134"
+      },
+      "primary_citations": [
+        {
+          "label": "Gulminelli and Raduta (2015), RG(SLy4) construction",
+          "url": "https://doi.org/10.1103/PhysRevC.92.055803"
+        },
+        {
+          "label": "Douchin and Haensel (2001), comparison SLy4 construction",
+          "url": "https://arxiv.org/abs/astro-ph/0111092"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "related_different_unified_construction",
+        "source_label": "Douchin and Haensel (2001), comparison SLy4 construction",
+        "source_url": "https://arxiv.org/abs/astro-ph/0111092",
+        "maximum_mass_msun": 2.05,
+        "radius_at_maximum_mass_km": 9.99,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "Contextual comparison only: RG(SLy4) uses a different unified crust construction."
+        ]
+      },
+      "analysis_notes": [
+        "RG(SLy4) uses the Gulminelli-Raduta unified crust construction and is not exactly the Douchin-Haensel SLy4 model.",
+        "A provisional 0.25 km literature-radius tolerance is allowed until the source-boundary truncation is quantified."
+      ]
+    },
+    {
+      "slug": "dd2",
+      "role": "core",
+      "model_id": "GPPVA(DD2)",
+      "compose_eos_id": 217,
+      "compose_page_url": "https://compose.obspm.fr/eos/217",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14808942/files/GPPVA_DD2_NS_unified_inner_crust-core_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14808942",
+        "bytes": 148370,
+        "sha256": "7dbf2749fe045df75ce26755fbdef8e5b51ddf0dbb512dee52c436b634d96e6b"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.42,
+        "radius_at_maximum_mass_km": 11.95,
+        "radius_at_1_4_msun_km": 13.19,
+        "source_url": "https://compose.obspm.fr/eos/217"
+      },
+      "primary_citations": [
+        {
+          "label": "Typel et al. (2010), DD2 interaction",
+          "url": "https://doi.org/10.1103/PhysRevC.81.015803"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "interaction_source_not_current_composite_star_sequence",
+        "source_label": "Typel et al. (2010), DD2 interaction",
+        "source_url": "https://doi.org/10.1103/PhysRevC.81.015803",
+        "maximum_mass_msun": null,
+        "radius_at_maximum_mass_km": null,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "The current CompOSE table has a specific BSk22 and Thomas-Fermi crust construction, so the interaction paper is physics provenance rather than a like-for-like stellar benchmark."
+        ]
+      },
+      "analysis_notes": [
+        "This catalogue model combines a BSk22 outer crust, a Thomas-Fermi DD2 inner crust, and a DD2 core."
+      ]
+    },
+    {
+      "slug": "fsu2h",
+      "role": "core",
+      "model_id": "GPPVA(FSU2H)",
+      "compose_eos_id": 213,
+      "compose_page_url": "https://compose.obspm.fr/eos/213",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14508945/files/GPPVA_FSU2H_NS_unified_inner_crust-core_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14508945",
+        "bytes": 145937,
+        "sha256": "a08cb8edb718ee0775e9ea497c573d1ca4a7110484a30230ad3bd4a00d379b4b"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.37,
+        "radius_at_maximum_mass_km": 12.43,
+        "radius_at_1_4_msun_km": 13.29,
+        "source_url": "https://compose.obspm.fr/eos/213"
+      },
+      "primary_citations": [
+        {
+          "label": "Negreiros et al. (2018), nucleonic FSU2H",
+          "url": "https://arxiv.org/abs/1804.00334"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "related_nucleonic_baseline_different_crust",
+        "source_label": "Negreiros et al. (2018), FSU2H nucleonic baseline in Table 2",
+        "source_url": "https://arxiv.org/abs/1804.00334",
+        "maximum_mass_msun": 2.376,
+        "radius_at_maximum_mass_km": 12.3,
+        "radius_at_1_4_msun_km": 13.2,
+        "notes": [
+          "Contextual comparison only: the paper focuses on hyperonic FSU2H and its nucleonic baseline uses a different crust from this CompOSE composite."
+        ]
+      },
+      "analysis_notes": [
+        "This is the nucleonic FSU2H archive, not the lower-maximum-mass hyperonic FSU2H model.",
+        "The primary-paper crust convention differs from the current CompOSE table."
+      ]
+    },
+    {
+      "slug": "tw",
+      "role": "core",
+      "model_id": "GPPVA(TW)",
+      "compose_eos_id": 219,
+      "compose_page_url": "https://compose.obspm.fr/eos/219",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14808949/files/GPPVA_TW_NS_unified_inner_crust-core_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14808949",
+        "bytes": 150654,
+        "sha256": "fa6542f5583a8cfad74192fe032b1f8cfa96e4448733368d84bbc80b708904fe"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.07,
+        "radius_at_maximum_mass_km": 10.7,
+        "radius_at_1_4_msun_km": 12.33,
+        "source_url": "https://compose.obspm.fr/eos/219"
+      },
+      "primary_citations": [
+        {
+          "label": "Typel and Wolter (1999), TW interaction",
+          "url": "https://doi.org/10.1016/S0375-9474(99)00310-3"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "interaction_source_not_current_composite_star_sequence",
+        "source_label": "Typel and Wolter (1999), TW interaction",
+        "source_url": "https://doi.org/10.1016/S0375-9474(99)00310-3",
+        "maximum_mass_msun": null,
+        "radius_at_maximum_mass_km": null,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "The current CompOSE table has a specific BSk22 and Thomas-Fermi crust construction, so the interaction paper is physics provenance rather than a like-for-like stellar benchmark."
+        ]
+      },
+      "analysis_notes": [
+        "This catalogue model uses the composite BSk22 plus Thomas-Fermi plus TW99 construction."
+      ]
+    },
+    {
+      "slug": "ddme_x",
+      "role": "core",
+      "model_id": "XMLSLZ(DDME-X)",
+      "compose_eos_id": 281,
+      "compose_page_url": "https://compose.obspm.fr/eos/281",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14809151/files/XMLSLZ_DDME-X_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14809151",
+        "bytes": 173141,
+        "sha256": "8f39e94d5bff07416062d3a1dd31d5f5bd156c77c035a463df6b73570220f07e"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.56,
+        "radius_at_maximum_mass_km": 12.36,
+        "radius_at_1_4_msun_km": 13.37,
+        "source_url": "https://compose.obspm.fr/eos/281"
+      },
+      "primary_citations": [
+        {
+          "label": "Xia et al. (2022), unified DDME-X construction",
+          "url": "https://arxiv.org/abs/2208.12893"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "related_earlier_unified_table_version",
+        "source_label": "Xia et al. (2022), unified DDME-X construction",
+        "source_url": "https://arxiv.org/abs/2208.12893",
+        "maximum_mass_msun": null,
+        "radius_at_maximum_mass_km": null,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "The current CompOSE archive reflects a later update, so the 2022 paper is model provenance rather than an exact numeric archive benchmark."
+        ]
+      },
+      "analysis_notes": [
+        "The current unified table is updated; older DDME-X or DD-MEX results are not interchangeable with this benchmark."
+      ]
+    },
+    {
+      "slug": "gm1y6",
+      "role": "core",
+      "model_id": "OPGR(GM1Y6)",
+      "compose_eos_id": 66,
+      "compose_page_url": "https://compose.obspm.fr/eos/66",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14803139/files/OPGR_GM1Y6_with_hyperons_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14803139",
+        "bytes": 74091,
+        "sha256": "d5b6478dc945d72bfd44847639009c3a4fd191c21e35373b3f53a2b6587447d2"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": false,
+        "eos.compo": true,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.29,
+        "radius_at_maximum_mass_km": 12.13,
+        "radius_at_1_4_msun_km": 13.78,
+        "source_url": "https://compose.obspm.fr/eos/66"
+      },
+      "primary_citations": [
+        {
+          "label": "Oertel et al. (2015), GM1Y6 hyperonic interaction",
+          "url": "https://arxiv.org/abs/1412.4545"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "interaction_source_without_like_for_like_numeric_sequence",
+        "source_label": "Oertel et al. (2015), GM1Y6 hyperonic interaction",
+        "source_url": "https://arxiv.org/abs/1412.4545",
+        "maximum_mass_msun": null,
+        "radius_at_maximum_mass_km": null,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "The paper is the interaction source; the archive's attached crust and exact particle-set realization make the current CompOSE catalogue the numeric benchmark."
+        ]
+      },
+      "ordering_analysis": {
+        "analysis_policy": "diagnostic_monotone_subsequence",
+        "sensitivity_policies": [
+          "diagnostic_monotone_subsequence",
+          "diagnostic_keep_later_monotone_subsequence"
+        ],
+        "expected_pressure_issues": [
+          {
+            "left_position": 47,
+            "right_position": 48,
+            "left_baryon_density_fm3": 0.000250584885047483,
+            "right_baryon_density_fm3": 0.001,
+            "relative_change": -0.039252595926013135
+          }
+        ]
+      },
+      "analysis_notes": [
+        "This model contains the full baryon octet and must not be compared with nucleonic GM1 or a generic GM1Y parametrization.",
+        "A Douchin-Haensel crust is attached below 1e-3 fm^-3.",
+        "The stable archive does not contain eos.mr, so only catalogue and primary-literature cross-checks are available."
+      ]
+    },
+    {
+      "slug": "apr",
+      "role": "core",
+      "model_id": "APR(APR)",
+      "compose_eos_id": 68,
+      "compose_page_url": "https://compose.obspm.fr/eos/68",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14508034/files/APR_APR_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14508034",
+        "bytes": 67848,
+        "sha256": "273d0ea9e3413bfdc8d105fe51f8790a3d45dc992993a1dbf0ccb1e047f341b8"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": false,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.19,
+        "radius_at_maximum_mass_km": 9.97,
+        "radius_at_1_4_msun_km": 11.37,
+        "source_url": "https://compose.obspm.fr/eos/68"
+      },
+      "primary_citations": [
+        {
+          "label": "Akmal, Pandharipande, and Ravenhall (1998)",
+          "url": "https://arxiv.org/abs/nucl-th/9804027"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "related_core_model_different_crust_and_causal_extension",
+        "source_label": "Akmal, Pandharipande, and Ravenhall (1998)",
+        "source_url": "https://arxiv.org/abs/nucl-th/9804027",
+        "maximum_mass_msun": 2.2,
+        "radius_at_maximum_mass_km": null,
+        "radius_at_1_4_msun_km": null,
+        "notes": [
+          "Contextual comparison only: the CompOSE archive uses a different crust match.",
+          "The original hydrostatic model becomes superluminal; its causal-limit replacement has a reported maximum mass of 2.19 Msun."
+        ]
+      },
+      "analysis_notes": [
+        "The APR core is matched to an SLy4 inner crust and a BPS outer crust.",
+        "The original model becomes superluminal at high density; compare the hydrostatic and causal endpoints separately."
+      ]
+    },
+    {
+      "slug": "qhc19_c",
+      "role": "stress",
+      "model_id": "BFH(QHC19-C)",
+      "compose_eos_id": 151,
+      "compose_page_url": "https://compose.obspm.fr/eos/151",
+      "archive": {
+        "filename": "archive.zip",
+        "url": "https://zenodo.org/api/records/14808640/files/BFH_QHC19-C_nparam_1.zip/content",
+        "zenodo_record_url": "https://zenodo.org/records/14808640",
+        "bytes": 51696,
+        "sha256": "e3def242e58d14664e85d8f77fb155769973b61733d9fbfdbd32f53c1a8a49d7"
+      },
+      "matter": "cold_beta_equilibrated",
+      "includes_leptons": true,
+      "expected_optional_files": {
+        "eos.mr": true,
+        "eos.compo": false,
+        "eos.micro": false
+      },
+      "compose_benchmark": {
+        "maximum_mass_msun": 2.18,
+        "radius_at_maximum_mass_km": 10.8,
+        "radius_at_1_4_msun_km": 11.6,
+        "source_url": "https://compose.obspm.fr/eos/151"
+      },
+      "primary_citations": [
+        {
+          "label": "Baym et al. (2019), QHC19 quark-hadron crossover",
+          "url": "https://arxiv.org/abs/1903.08963"
+        }
+      ],
+      "literature_assessment": {
+        "comparability": "like_for_like",
+        "source_label": "Baym et al. (2019), QHC19-C",
+        "source_url": "https://arxiv.org/abs/1903.08963",
+        "maximum_mass_msun": 2.18,
+        "radius_at_maximum_mass_km": 10.8,
+        "radius_at_1_4_msun_km": 11.6,
+        "notes": [
+          "The current QHC19-C data sheet reports the same set-C stellar benchmarks."
+        ]
+      },
+      "analysis_notes": [
+        "This hybrid crossover EoS is an explicit stress test rather than part of the eight-model core comparison.",
+        "Any continuous-barotrope failure must remain visible; do not invent a phase-transition repair."
+      ]
+    }
+  ]
+}

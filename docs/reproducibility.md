@@ -9,8 +9,9 @@ does not claim that a hash alone proves physical correctness.
 Commands print by default and write only when `--output NEW_DIRECTORY` is
 requested. An existing directory is never overwritten. Inspection, star, and
 sequence bundles contain the model report; stellar bundles also contain the
-exact solver settings and EoS provenance identity. Sequence bundles retain
-every attempted central pressure and failure reason.
+exact solver settings, physical conversion constants and their authority, and
+the EoS provenance identity. Sequence bundles retain every attempted central
+pressure and failure reason.
 
 ## Analytical definitions
 
@@ -41,6 +42,12 @@ For a retained experiment, record:
 - input source and hash;
 - model report and diagnostic codes;
 - Python, NumPy, SciPy, and toolkit versions;
+- the physical conversion constants and named authority used by the stellar
+  equations;
 - all stellar and sampling parameters;
 - every successful and unsuccessful requested result;
 - the exact analytical definition file when applicable.
+
+Tracked research campaigns should additionally hash the runner, acquisition
+script, registry, and scientific package sources. A commit plus a dirty flag is
+not enough to reconstruct calculations made from an uncommitted worktree.

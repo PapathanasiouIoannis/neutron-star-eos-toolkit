@@ -12,11 +12,14 @@ from pathlib import Path
 import numpy as np
 
 from neutron_star_eos import (
+    EosDomainError,
     EosInputError,
     StellarConfig,
     build_compose_eos,
     interpolate_compose_thermodynamics,
     load_compose_dataset,
+    load_compose_eos,
+    load_compose_mass_radius_reference,
     solve_star,
 )
 from neutron_star_eos.cli import main as eos_tool_main
@@ -42,6 +45,7 @@ def write_compose_fixture(
     | None = None,
     composition_quadruple: tuple[int, float, float, float] | None = None,
     additional_values_by_row: tuple[tuple[float, ...], ...] | None = None,
+    mass_radius_payload: str = "10.0 1.0\n",
 ) -> Path:
     densities = np.asarray(
         density_values or (0.1, 0.2, 0.3, 0.4, 0.5, 0.6), dtype=float
@@ -134,7 +138,7 @@ def write_compose_fixture(
             else "synthetic optional microphysics payload\n"
         ),
         "eos.init": "synthetic initialization metadata\n",
-        "eos.mr": "10.0 1.0\n",
+        "eos.mr": mass_radius_payload,
     }
     archive_path = root / "compose.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -144,6 +148,122 @@ def write_compose_fixture(
 
 
 class ComposeWorkflowTests(unittest.TestCase):
+    def test_compose_barotrope_exposes_native_density_pressure_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = write_compose_fixture(Path(temporary))
+            eos = load_compose_eos(
+                archive,
+                model_id="density-mapping-fixture",
+                source_url="https://example.invalid/density-mapping-fixture",
+                matter="cold_beta_equilibrated",
+                includes_leptons=True,
+            )
+            density = eos.baryon_density_fm3
+            pressure = eos.pressure_mev_fm3
+            np.testing.assert_allclose(
+                eos.pressure_from_baryon_density(density),
+                pressure,
+                rtol=2.0e-14,
+            )
+            np.testing.assert_allclose(
+                eos.baryon_density_from_pressure(pressure),
+                density,
+                rtol=2.0e-14,
+            )
+            self.assertEqual(eos.baryon_density_min_fm3, density[0])
+            self.assertEqual(eos.baryon_density_max_fm3, density[-1])
+            with self.assertRaises(EosDomainError):
+                eos.pressure_from_baryon_density(density[0] * 0.9)
+            with self.assertRaises(EosDomainError):
+                eos.baryon_density_from_pressure(pressure[-1] * 1.1)
+
+    def test_mass_radius_reference_preserves_source_order_and_unknown_columns(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = (
+                "CompOSE source-defined compact-star reference\n"
+                "# Radius [km] Gravitational mass [M_sol] source-defined extra\n"
+                "12.5 0.7 1.0D+04\n"
+                "11.8 1.4 320\n"
+                "10.2 2.1 4\n"
+            )
+            archive = write_compose_fixture(
+                Path(temporary), mass_radius_payload=payload
+            )
+            dataset = load_compose_dataset(
+                archive,
+                model_id="reference-fixture",
+                source_url="https://example.invalid/reference-fixture",
+            )
+            reference = load_compose_mass_radius_reference(dataset)
+
+            self.assertEqual(reference.rows, 3)
+            self.assertEqual(
+                reference.column_names,
+                ("radius_km", "mass_msun", "source_column_3"),
+            )
+            np.testing.assert_array_equal(reference.radius_km, (12.5, 11.8, 10.2))
+            np.testing.assert_array_equal(reference.mass_msun, (0.7, 1.4, 2.1))
+            np.testing.assert_array_equal(
+                reference.column("source_column_3"), (1.0e4, 320.0, 4.0)
+            )
+            self.assertFalse(reference.radius_km.flags.writeable)
+            self.assertEqual(reference.header_lines, tuple(payload.splitlines()[:2]))
+            provenance = reference.provenance()
+            self.assertEqual(
+                provenance["role"], "independent_reference_not_solver_input"
+            )
+            self.assertFalse(provenance["stable_branch_inferred"])
+            self.assertFalse(provenance["maximum_mass_inferred"])
+            self.assertFalse(provenance["additional_columns_interpreted"])
+            self.assertEqual(
+                provenance["source_file"]["sha256"],
+                hashlib.sha256(payload.encode("ascii")).hexdigest(),
+            )
+
+    def test_mass_radius_reference_accepts_headerless_two_column_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = write_compose_fixture(
+                Path(temporary), mass_radius_payload="14.0 0.2\n10.0 2.0\n"
+            )
+            dataset = load_compose_dataset(
+                archive,
+                model_id="headerless-reference",
+                source_url="https://example.invalid/headerless-reference",
+            )
+            reference = load_compose_mass_radius_reference(dataset)
+            self.assertEqual(reference.header_lines, ())
+            self.assertEqual(reference.column_names, ("radius_km", "mass_msun"))
+            self.assertEqual(reference.to_dict()["data"]["mass_msun"], [0.2, 2.0])
+
+    def test_mass_radius_reference_rejects_missing_or_inconsistent_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = write_compose_fixture(
+                root, mass_radius_payload="12.0 1.0\n11.0 1.4 20.0\n"
+            )
+            dataset = load_compose_dataset(
+                archive,
+                model_id="malformed-reference",
+                source_url="https://example.invalid/malformed-reference",
+            )
+            with self.assertRaisesRegex(EosInputError, "has 3 columns; expected 2"):
+                load_compose_mass_radius_reference(dataset)
+
+            directory = root / "without-reference"
+            directory.mkdir()
+            with zipfile.ZipFile(archive) as source:
+                for name in ("eos.t", "eos.nb", "eos.yq", "eos.thermo"):
+                    (directory / name).write_bytes(source.read(f"model/{name}"))
+            without_reference = load_compose_dataset(
+                directory,
+                model_id="missing-reference",
+                source_url="https://example.invalid/missing-reference",
+            )
+            with self.assertRaisesRegex(EosInputError, "does not provide eos.mr"):
+                load_compose_mass_radius_reference(without_reference)
+
     def test_density_axis_requires_strictly_positive_baryon_density(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = write_compose_fixture(

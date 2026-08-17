@@ -68,4 +68,19 @@ geometric grid and requires at least nine integer points.
 
 `validation_mode="strict"` is the default. The expert
 `background_diagnostic` mode retains named causality or mechanical findings;
-it never upgrades the EoS to a physical validation pass.
+it never upgrades the EoS to a physical validation pass. Because the
+background TOV equations use only the invertible energy-density--pressure
+relation, this diagnostic mode permits finite sound-speed values outside the
+strict physical interval while recording the corresponding validation issue.
+Nonfinite thermodynamics remain an error.
+
+## Physical constants
+
+Stellar results serialize the physical conversion constants, their authority,
+and the authority URL alongside the ODE settings. The values are derived from
+the [CompOSE Reference Manual v3.01](https://compose.obspm.fr/download/pdf/manual_v3.00.pdf)
+constants table: `c = 299792458 m s^-1`, `G = 6.67430e-11 m^3 kg^-1
+s^-2`, `M_sun = 1.98841e30 kg`, and the exact SI definitions of the electronvolt
+and femtometre. This gives
+`GRAVITY_CONVERSION = 1.1266082139640147e-5` and
+`G M_sun / c^2 = 1.4766251340718246 km`; neither is truncated for integration.

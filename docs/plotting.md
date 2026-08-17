@@ -33,10 +33,16 @@ plot_sound_speed_squared(model, ax=axes[1])
   thermodynamics, and an optional continuous stellar barotrope.
 - `plot_sound_speed_squared` marks the mechanical boundary `c_s^2 = 0` and
   causal boundary `c_s^2 = 1`. CompOSE sound-speed definitions remain separate.
-- `plot_compose_closure_residuals` presents thermodynamic closure diagnostics.
+- `plot_compose_closure_residuals` presents pressure/energy/Gibbs closure
+  magnitudes on a logarithmic scale; exact zeros are disclosed and omitted only
+  from the rendering.
+- `plot_compose_free_energy_closure_residuals` gives the free-energy closures
+  their own focused axes instead of overplotting every diagnostic together.
 - `plot_compose_cold_residuals` presents the cold/beta-equilibrium residuals.
-- `plot_composition` preserves missing coverage as `NaN`; it does not label all
-  CompOSE composition-like fields as fractions.
+- `plot_composition` preserves missing coverage as `NaN`; it names the verified
+  standard electron, muon, neutron, and proton codes while retaining each code,
+  marks unknown codes as source-defined, and does not label every
+  composition-like field as a fraction.
 - `plot_phase_codes` displays source-defined codes without inventing physical
   labels.
 

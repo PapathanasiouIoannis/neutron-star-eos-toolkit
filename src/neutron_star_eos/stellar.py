@@ -21,8 +21,29 @@ from neutron_star_eos.eos import (
     _eos_provenance_sha256,
 )
 
-GRAVITY_CONVERSION = 1.124e-5
-SOLAR_MASS_LENGTH_KM = 1.4766
+STELLAR_CONSTANT_AUTHORITY = (
+    "CompOSE Reference Manual v3.01 constants table; SI definitions"
+)
+STELLAR_CONSTANT_REFERENCE_URL = (
+    "https://compose.obspm.fr/download/pdf/manual_v3.00.pdf"
+)
+SPEED_OF_LIGHT_M_S = 299_792_458.0
+NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2 = 6.67430e-11
+SOLAR_MASS_KG = 1.98841e30
+MEV_J = 1.602176634e-13
+FM3_M3 = 1.0e-45
+
+# In dm/dr = A r^2 epsilon, r is km, epsilon is MeV fm^-3, and m is
+# measured in solar masses.  The 1e9 factor converts r^2 dr from km^3 to m^3.
+GRAVITY_CONVERSION = (
+    4.0 * math.pi * 1.0e9 * (MEV_J / FM3_M3) / (SPEED_OF_LIGHT_M_S**2 * SOLAR_MASS_KG)
+)
+SOLAR_MASS_LENGTH_KM = (
+    NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2
+    * SOLAR_MASS_KG
+    / SPEED_OF_LIGHT_M_S**2
+    / 1.0e3
+)
 STELLAR_VALIDATION_MODES = ("strict", "background_diagnostic")
 BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES = frozenset({"acausal", "mechanical_instability"})
 
@@ -58,6 +79,22 @@ def _config_to_dict(config: StellarConfig) -> dict[str, float | int]:
         "ode_rtol": config.ode_rtol,
         "ode_atol": config.ode_atol,
         "profile_points": config.profile_points,
+    }
+
+
+def _constants_to_dict() -> dict[str, str | float]:
+    return {
+        "authority": STELLAR_CONSTANT_AUTHORITY,
+        "authority_url": STELLAR_CONSTANT_REFERENCE_URL,
+        "speed_of_light_m_s": SPEED_OF_LIGHT_M_S,
+        "newtonian_gravitational_constant_m3_kg_s2": (
+            NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2
+        ),
+        "solar_mass_kg": SOLAR_MASS_KG,
+        "MeV_J": MEV_J,
+        "fm3_m3": FM3_M3,
+        "gravity_conversion_Msun_per_km3_per_MeV_fm3": GRAVITY_CONVERSION,
+        "solar_mass_length_km": SOLAR_MASS_LENGTH_KM,
     }
 
 
@@ -102,6 +139,7 @@ class StarResult:
                 "issues": list(self.eos_validation_issues),
             },
             "solver_config": _config_to_dict(self.solver_config),
+            "physical_constants": _constants_to_dict(),
             "boundary": {
                 "status": self.boundary_status,
                 "pressure_MeV_fm3": self.boundary_pressure_mev_fm3,
@@ -167,6 +205,7 @@ class SequenceResult:
                 "issues": list(self.eos_validation_issues),
             },
             "solver_config": _config_to_dict(self.solver_config),
+            "physical_constants": _constants_to_dict(),
             "attempts": [item.to_dict() for item in self.attempts],
         }
 
@@ -253,6 +292,7 @@ def _solve_validated_star_radius(
     *,
     config: StellarConfig,
     retain_profile: bool,
+    enforce_sound_speed_bounds: bool,
 ) -> StarResult:
     pressure_min = _finite("EoS lower pressure", eos.pressure_min_mev_fm3)
     pressure_max = _finite("EoS upper pressure", eos.pressure_max_mev_fm3)
@@ -265,7 +305,9 @@ def _solve_validated_star_radius(
     central_epsilon, central_cs2 = map(float, eos(central_pressure))
     if not math.isfinite(central_epsilon) or central_epsilon <= 0.0:
         raise EosInputError("central energy density must be finite and positive")
-    if not math.isfinite(central_cs2) or not 0.0 < central_cs2 <= 1.0:
+    if not math.isfinite(central_cs2):
+        raise EosInputError("central sound speed squared must be finite")
+    if enforce_sound_speed_bounds and not 0.0 < central_cs2 <= 1.0:
         raise EosInputError("central sound speed squared must satisfy 0 < cs2 <= 1")
 
     radius_start = config.radius_start_km
@@ -280,7 +322,11 @@ def _solve_validated_star_radius(
             raise EosInputError(
                 "EoS returned invalid energy density during TOV integration"
             )
-        if not math.isfinite(cs2) or not 0.0 < cs2 <= 1.0:
+        if not math.isfinite(cs2):
+            raise EosInputError(
+                "EoS returned nonfinite sound speed during TOV integration"
+            )
+        if enforce_sound_speed_bounds and not 0.0 < cs2 <= 1.0:
             raise EosInputError(
                 "EoS returned invalid sound speed during TOV integration"
             )
@@ -383,6 +429,7 @@ def _solve_validated_star_log_pressure(
     *,
     config: StellarConfig,
     retain_profile: bool,
+    enforce_sound_speed_bounds: bool,
 ) -> StarResult:
     """Integrate a tabulated barotrope with ``log(P)`` as the coordinate.
 
@@ -401,7 +448,9 @@ def _solve_validated_star_log_pressure(
     central_epsilon, central_cs2 = map(float, eos(central_pressure))
     if not math.isfinite(central_epsilon) or central_epsilon <= 0.0:
         raise EosInputError("central energy density must be finite and positive")
-    if not math.isfinite(central_cs2) or not 0.0 < central_cs2 <= 1.0:
+    if not math.isfinite(central_cs2):
+        raise EosInputError("central sound speed squared must be finite")
+    if enforce_sound_speed_bounds and not 0.0 < central_cs2 <= 1.0:
         raise EosInputError("central sound speed squared must satisfy 0 < cs2 <= 1")
 
     radius_start = config.radius_start_km
@@ -423,7 +472,11 @@ def _solve_validated_star_log_pressure(
             raise EosInputError(
                 "EoS returned invalid energy density during TOV integration"
             )
-        if not math.isfinite(cs2) or not 0.0 < cs2 <= 1.0:
+        if not math.isfinite(cs2):
+            raise EosInputError(
+                "EoS returned nonfinite sound speed during TOV integration"
+            )
+        if enforce_sound_speed_bounds and not 0.0 < cs2 <= 1.0:
             raise EosInputError(
                 "EoS returned invalid sound speed during TOV integration"
             )
@@ -550,7 +603,9 @@ def _solve_validated_star(
     *,
     config: StellarConfig,
     retain_profile: bool,
+    validation_mode: str,
 ) -> StarResult:
+    enforce_sound_speed_bounds = validation_mode == "strict"
     route = getattr(eos, "preferred_stellar_integration_variable", "radius")
     if route == "log_pressure":
         return _solve_validated_star_log_pressure(
@@ -558,6 +613,7 @@ def _solve_validated_star(
             central_pressure,
             config=config,
             retain_profile=retain_profile,
+            enforce_sound_speed_bounds=enforce_sound_speed_bounds,
         )
     if route != "radius":
         raise EosInputError(f"unsupported stellar integration variable: {route!r}")
@@ -566,6 +622,7 @@ def _solve_validated_star(
         central_pressure,
         config=config,
         retain_profile=retain_profile,
+        enforce_sound_speed_bounds=enforce_sound_speed_bounds,
     )
 
 
@@ -597,6 +654,7 @@ def solve_star(
             pressure,
             config=resolved,
             retain_profile=bool(retain_profile),
+            validation_mode=validation_mode,
         ),
         validation_mode=validation_mode,
         validation_status=validation_status,
@@ -656,6 +714,7 @@ def solve_sequence(
                 candidate,
                 config=resolved,
                 retain_profile=False,
+                validation_mode=validation_mode,
             )
         except (EosInputError, RuntimeError, ArithmeticError) as exc:
             attempts.append(
@@ -701,6 +760,15 @@ def solve_sequence(
 
 __all__ = [
     "DEFAULT_STELLAR_CONFIG",
+    "GRAVITY_CONVERSION",
+    "MEV_J",
+    "FM3_M3",
+    "NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2",
+    "SOLAR_MASS_KG",
+    "SOLAR_MASS_LENGTH_KM",
+    "SPEED_OF_LIGHT_M_S",
+    "STELLAR_CONSTANT_AUTHORITY",
+    "STELLAR_CONSTANT_REFERENCE_URL",
     "BACKGROUND_DIAGNOSTIC_ALLOWED_ISSUES",
     "SequenceAttempt",
     "SequenceResult",

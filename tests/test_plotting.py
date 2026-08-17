@@ -13,6 +13,7 @@ from neutron_star_eos import EosModel
 from neutron_star_eos.plotting import (
     plot_compose_closure_residuals,
     plot_compose_cold_residuals,
+    plot_compose_free_energy_closure_residuals,
     plot_composition,
     plot_mass_profile,
     plot_mass_radius,
@@ -94,6 +95,11 @@ def compose_view() -> ThermodynamicView:
             ),
             "composition_pair_1": np.asarray((0.1, np.nan, 0.3, 0.4, 0.5)),
             "composition_pair_1_available": np.asarray((1.0, 0.0, 1.0, 1.0, 1.0)),
+            "composition_pair_0": np.asarray((0.2, 0.2, 0.2, 0.2, 0.2)),
+            "composition_pair_10": np.asarray((0.5, 0.5, 0.5, 0.5, 0.5)),
+            "composition_pair_11": np.asarray((0.1, 0.1, 0.1, 0.1, 0.1)),
+            "composition_pair_999": np.asarray((0.3, 0.3, 0.3, 0.3, 0.3)),
+            "composition_quadruple_7_Yav": np.asarray((0.4, 0.4, 0.4, 0.4, 0.4)),
             "phase_code": np.asarray((1.0, 1.0, 2.0, np.nan, 2.0)),
             "phase_code_available": np.asarray((1.0, 1.0, 1.0, 0.0, 1.0)),
         },
@@ -122,6 +128,22 @@ def compose_view() -> ThermodynamicView:
         "compose",
         (native, retained, continuous),
     )
+
+
+def zero_cold_view() -> ThermodynamicView:
+    density = np.geomspace(1.0e-8, 1.0, 101)
+    zeros = np.zeros_like(density)
+    native = _series(
+        "native_thermodynamics",
+        "zero cold residuals",
+        {
+            "baryon_density_fm3": density,
+            "source_node_position": np.arange(len(density), dtype=float),
+            "q5_beta_equilibrium_residual": zeros,
+            "q6_minus_q7_zero_temperature_residual": zeros,
+        },
+    )
+    return ThermodynamicView("zero-cold-fixture", "compose", (native,))
 
 
 class ViewOnlyModel:
@@ -236,6 +258,17 @@ class PlottingTests(unittest.TestCase):
                 "Non-positive pressure retained" in item.get_text() for item in ax.texts
             )
         )
+        native_nodes = next(
+            item for item in ax.collections if item.get_label() == "native source nodes"
+        )
+        retained_nodes = next(
+            item
+            for item in ax.collections
+            if item.get_label() == "stellar-barotrope source nodes"
+        )
+        self.assertGreater(native_nodes.get_zorder(), retained_nodes.get_zorder())
+        self.assertTrue(np.all(native_nodes.get_sizes() > retained_nodes.get_sizes()))
+        self.assertEqual(len(retained_nodes.get_facecolors()), 0)
 
     def test_analytical_sampling_stays_in_domain_and_reuses_axes(self) -> None:
         evaluations: list[np.ndarray] = []
@@ -289,20 +322,59 @@ class PlottingTests(unittest.TestCase):
         self.assertTrue(any(np.all(values == 1.0) for values in horizontal_values))
 
     def test_compose_diagnostic_plots_render_with_thresholds(self) -> None:
-        closure = plot_compose_closure_residuals(
+        closure = plot_compose_closure_residuals(compose_view())
+        combined = plot_compose_closure_residuals(
             compose_view(), include_free_energy=True
         )
+        free_energy = plot_compose_free_energy_closure_residuals(compose_view())
         cold = plot_compose_cold_residuals(compose_view())
-        self.assertEqual(closure.get_yscale(), "symlog")
-        self.assertEqual(cold.get_yscale(), "symlog")
+        self.assertEqual(closure.get_yscale(), "log")
+        self.assertEqual(free_energy.get_yscale(), "log")
+        self.assertEqual(cold.get_yscale(), "linear")
         self.assertTrue(
             any("diagnostic threshold" in line.get_label() for line in closure.lines)
         )
         self.assertTrue(
             any("diagnostic threshold" in line.get_label() for line in cold.lines)
         )
+        ordinary_labels = {line.get_label() for line in closure.lines}
+        free_energy_labels = {line.get_label() for line in free_energy.lines}
+        combined_labels = {line.get_label() for line in combined.lines}
+        self.assertNotIn("free-energy pressure", ordinary_labels)
+        self.assertEqual(
+            free_energy_labels
+            - {
+                label for label in free_energy_labels if "diagnostic threshold" in label
+            },
+            {"free-energy pressure", "free-energy chemical potential"},
+        )
+        self.assertIn("Euler", combined_labels)
+        self.assertIn("free-energy pressure", combined_labels)
+        self.assertTrue(any("exact-zero" in item.get_text() for item in closure.texts))
         closure.figure.canvas.draw()
+        combined.figure.canvas.draw()
+        free_energy.figure.canvas.draw()
         cold.figure.canvas.draw()
+
+    def test_zero_cold_residuals_have_visible_linear_scale_and_summary(self) -> None:
+        ax = plot_compose_cold_residuals(zero_cold_view())
+        tolerance = 1.0e-7
+        self.assertEqual(ax.get_yscale(), "linear")
+        lower, upper = ax.get_ylim()
+        self.assertLess(lower, -tolerance)
+        self.assertGreater(upper, tolerance)
+        all_text = " ".join(item.get_text() for item in ax.texts)
+        self.assertIn("identically zero", all_text)
+        diagnostic_lines = [line for line in ax.lines if "residual" in line.get_label()]
+        self.assertEqual(
+            {(line.get_linestyle(), line.get_marker()) for line in diagnostic_lines},
+            {("-", "o"), ("--", "s")},
+        )
+        self.assertLessEqual(
+            max(len(line.get_markevery()) for line in diagnostic_lines),
+            36,
+        )
+        ax.figure.canvas.draw()
 
     def test_composition_preserves_missing_values_as_gaps(self) -> None:
         view = compose_view()
@@ -319,6 +391,27 @@ class PlottingTests(unittest.TestCase):
         )
         self.assertTrue(any("retained as gaps" in text.get_text() for text in ax.texts))
         self.assertNotIn("fraction", ax.get_ylabel().lower())
+        self.assertLessEqual(len(ax.lines[0].get_markevery()), 36)
+
+    def test_composition_labels_verified_codes_and_marks_unknown_codes(self) -> None:
+        ax = plot_composition(
+            compose_view(),
+            quantities=(
+                "composition_pair_0",
+                "composition_pair_1",
+                "composition_pair_10",
+                "composition_pair_11",
+                "composition_pair_999",
+                "composition_quadruple_7_Yav",
+            ),
+        )
+        labels = {line.get_label() for line in ax.lines}
+        self.assertIn("electrons (code 0)", labels)
+        self.assertIn("muons (code 1)", labels)
+        self.assertIn("neutrons (code 10)", labels)
+        self.assertIn("protons (code 11)", labels)
+        self.assertIn("source-defined particle (code 999)", labels)
+        self.assertIn("source-defined nuclear group (code 7): Yav", labels)
 
     def test_phase_codes_are_explicitly_uninterpreted(self) -> None:
         ax = plot_phase_codes(compose_view())

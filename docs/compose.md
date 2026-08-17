@@ -87,8 +87,18 @@ reports.
 The required files are `eos.t`, `eos.nb`, `eos.yq`, and `eos.thermo`.
 `eos.compo` is optional. The source layer follows the CompOSE Reference Manual
 v3.01, sections 4.2.1--4.2.9 and Appendix A. The native workflow structurally
-parses `eos.compo` and `eos.micro`; `eos.init` and `eos.mr` remain preserved
-opaque source bytes in the reusable library.
+parses `eos.compo` and `eos.micro`; `eos.init` remains preserved as opaque source
+bytes. Optional `eos.mr` data can be opened explicitly as an independent
+reference with `load_compose_mass_radius_reference(dataset)`. Only its standard
+first two columns (radius in km and gravitational mass in solar masses) are
+interpreted; later columns remain source-defined and must be identified from the
+model data sheet. Reference points are never used as input to the TOV solver.
+
+The continuous CompOSE adapter also exposes
+`pressure_from_baryon_density(...)` and
+`baryon_density_from_pressure(...)`. Both enforce the selected native-density
+domain and never extrapolate; this supports explicit central-density grids
+without reaching into private interpolation state.
 
 ```powershell
 eos-tool inspect path\to\eos.zip --kind compose `

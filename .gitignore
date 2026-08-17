@@ -10,3 +10,12 @@ build/
 dist/
 notebook-output/
 uv.lock
+
+# Local CompOSE campaign inputs and generated artifacts. The tracked registry
+# records their stable sources and hashes; upstream archives are not relicensed
+# by this repository's MIT license.
+/experiments/compose_comparison/data/raw/
+/experiments/compose_comparison/data/derived/
+/experiments/compose_comparison/figures/
+/experiments/compose_comparison/results/
+/experiments/compose_comparison/manifest.json

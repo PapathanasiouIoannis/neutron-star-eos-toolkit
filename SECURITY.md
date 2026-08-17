@@ -2,10 +2,10 @@
 
 ## Supported versions
 
-The neutron-star EoS toolkit is currently a private pre-release. No version has
-yet been published with a public security-support commitment. Security fixes
-on the active development branch are handled on a best-effort basis until a
-supported release policy is declared.
+The neutron-star EoS toolkit is currently in pre-release development. No
+version has yet been published with a public security-support commitment.
+Security fixes on the active development branch are handled on a best-effort
+basis until a supported release policy is declared.
 
 ## Reporting a vulnerability
 
@@ -27,16 +27,16 @@ Include, where possible:
 - the potential impact; and
 - any known workaround.
 
-Receipt and remediation times are not guaranteed during the private
-pre-release phase. The owner will coordinate disclosure after the report has
-been assessed and an appropriate fix is available.
+Receipt and remediation times are not guaranteed during the pre-release phase.
+The owner will coordinate disclosure after the report has been assessed and an
+appropriate fix is available.
 
 ## Security versus scientific correctness
 
 Incorrect units, numerical results, validation behavior, or scientific claims
-are important defects and should be reported through the normal private issue
-workflow. Treat a defect as a security report when it can also expose or alter
-data, execute unintended code, escape an intended filesystem location, consume
+are important defects and should be reported through the normal issue workflow.
+Treat a defect as a security report when it can also expose or alter data,
+execute unintended code, escape an intended filesystem location, consume
 resources in a way that affects service availability, or cross another trust
 boundary.
 

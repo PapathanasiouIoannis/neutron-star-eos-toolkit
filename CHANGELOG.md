@@ -4,9 +4,8 @@ Notable changes to the neutron-star EoS toolkit are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and released
 versions will follow [Semantic Versioning](https://semver.org/).
 
-This repository is currently a private pre-release. Version `0.2.0` is the
-active development version; it has not been published or tagged as a supported
-release.
+Version `0.2.0` is the active development version; it has not been published or
+tagged as a supported release.
 
 ## [Unreleased]
 
@@ -29,6 +28,11 @@ release.
   Matplotlib style.
 - A guided, headlessly tested experiment notebook plus an editable analytical
   `P(epsilon)` definition with source hashing and an opt-in result manifest.
+- A pinned nine-model cold CompOSE campaign that independently calculates TOV
+  sequences, writes one plot per PNG, and cross-checks catalogue, optional
+  `eos.mr`, and convention-classified literature benchmarks.
+- A provenance-preserving reader for optional CompOSE `eos.mr` tables and
+  no-extrapolation mappings between native baryon density and pressure.
 - Stable command-line and sequence-attempt reason codes.
 - Architecture, CompOSE, and runnable input examples for the current public
   interface.
@@ -44,9 +48,13 @@ release.
   a calculation.
 - Result serialization now validates both model provenance and result type,
   and never overwrites an existing output directory.
+- The TOV unit conversions now retain the precision implied by the CompOSE
+  v3.01 constants table, and every stellar result records those constants and
+  their authority for reproducibility.
 
 ### Release status
 
 - The verified runtime remains CPython 3.12 with NumPy 1.26.4 and SciPy 1.13.1.
-- No software license, public support promise, package-index publication, or
-  archived release is implied by this development version.
+- The source is distributed under the MIT License. No public support promise,
+  package-index publication, or archived release is implied by this
+  development version.

@@ -7,10 +7,12 @@ from neutron_star_eos.compose import (
     ComposeColdSlice,
     ComposeDataset,
     ComposeEos,
+    ComposeMassRadiusReference,
     ComposeSliceReport,
     build_compose_eos,
     load_compose_dataset,
     load_compose_eos,
+    load_compose_mass_radius_reference,
 )
 from neutron_star_eos.compose.thermodynamics import (
     COMPOSE_NATIVE_INTERPOLATION_POLICY,

@@ -70,6 +70,26 @@ _CLOSURE_LABELS = {
     "free_energy_muB_normalized_residual": "free-energy chemical potential",
 }
 
+# Standard indices used by the downloaded CompOSE tables in this project.  A
+# provider-defined or otherwise unverified code must never acquire a guessed
+# physical interpretation in a figure legend.
+_COMPOSE_PARTICLE_LABELS = {
+    0: "electrons",
+    1: "muons",
+    10: "neutrons",
+    11: "protons",
+}
+
+_ORDINARY_CLOSURE_NAMES = (
+    "euler_normalized_residual",
+    "first_law_normalized_residual",
+    "gibbs_duhem_normalized_residual",
+)
+_FREE_ENERGY_CLOSURE_NAMES = (
+    "free_energy_pressure_normalized_residual",
+    "free_energy_muB_normalized_residual",
+)
+
 
 def _require_matplotlib() -> tuple[Any, Any]:
     """Import the optional plotting dependency only when a plot is requested."""
@@ -130,6 +150,31 @@ def _source_indices(series: ThermodynamicSeries) -> np.ndarray:
         return np.asarray([], dtype=int)
     positions = series.column("source_node_position")
     return np.flatnonzero(np.isfinite(positions) & (positions >= 0.0))
+
+
+def _sparse_markevery(
+    indices: np.ndarray,
+    *,
+    maximum: int = 36,
+    offset: int = 0,
+) -> list[int] | None:
+    """Return representative source-node markers without covering the curve."""
+
+    source_indices = np.asarray(indices, dtype=int)
+    if not len(source_indices):
+        return None
+    if len(source_indices) <= maximum:
+        selected = source_indices[offset::2] if offset else source_indices
+        if len(selected):
+            return [int(item) for item in selected]
+        return [int(source_indices[-1])]
+    positions = np.linspace(0, len(source_indices) - 1, maximum, dtype=int)
+    selected = source_indices[np.unique(positions)]
+    if offset:
+        selected = selected[offset::2]
+    return (
+        [int(item) for item in selected] if len(selected) else [int(source_indices[-1])]
+    )
 
 
 def _set_positive_xscale(ax: Axes, values: Sequence[np.ndarray]) -> None:
@@ -244,13 +289,14 @@ def plot_pressure_energy(
                     ax.scatter(
                         epsilon[indices],
                         pressure[indices],
-                        s=28,
+                        s=20,
                         marker="o",
-                        facecolors="white",
+                        facecolors="none",
                         edgecolors=_ORANGE,
-                        linewidths=1.0,
+                        linewidths=0.9,
+                        alpha=0.85,
                         label="native source nodes",
-                        zorder=4,
+                        zorder=6,
                     )
 
         if source is not None and {
@@ -270,13 +316,14 @@ def plot_pressure_energy(
                 ax.scatter(
                     epsilon,
                     pressure,
-                    s=25,
+                    s=12,
                     marker="s" if view.input_kind == "compose" else "o",
-                    facecolors=_BLUE if view.input_kind == "compose" else "white",
+                    facecolors="none",
                     edgecolors=_BLUE,
-                    linewidths=1.0,
+                    linewidths=0.75,
+                    alpha=0.55 if view.input_kind == "compose" else 0.8,
                     label=label,
-                    zorder=5,
+                    zorder=4,
                 )
 
         if continuous is not None and show_stellar_barotrope:
@@ -447,23 +494,59 @@ def plot_compose_closure_residuals(
     curve_points: int = 513,
     include_free_energy: bool = False,
 ) -> Axes:
-    """Plot sampled CompOSE closure residuals as diagnostics, not repairs."""
+    """Plot ordinary CompOSE closure magnitudes as diagnostics, not repairs.
+
+    ``include_free_energy=True`` retains the historical combined view.  Use
+    :func:`plot_compose_free_energy_closure_residuals` for a focused plot of
+    only the two free-energy closures.
+    """
 
     plt, _log_norm = _require_matplotlib()
     view = _view(model, curve_points=curve_points)
     native = _native_required(view)
-    names = [
-        "euler_normalized_residual",
-        "first_law_normalized_residual",
-        "gibbs_duhem_normalized_residual",
-    ]
+    names = list(_ORDINARY_CLOSURE_NAMES)
     if include_free_energy:
-        names.extend(
-            (
-                "free_energy_pressure_normalized_residual",
-                "free_energy_muB_normalized_residual",
-            )
-        )
+        names.extend(_FREE_ENERGY_CLOSURE_NAMES)
+    return _plot_compose_closure_group(
+        plt,
+        view,
+        native,
+        tuple(names),
+        ax=ax,
+        title="CompOSE closure diagnostics",
+    )
+
+
+def plot_compose_free_energy_closure_residuals(
+    model: EosModel | ThermodynamicView,
+    *,
+    ax: Axes | None = None,
+    curve_points: int = 513,
+) -> Axes:
+    """Plot only the two normalized CompOSE free-energy closure magnitudes."""
+
+    plt, _log_norm = _require_matplotlib()
+    view = _view(model, curve_points=curve_points)
+    native = _native_required(view)
+    return _plot_compose_closure_group(
+        plt,
+        view,
+        native,
+        _FREE_ENERGY_CLOSURE_NAMES,
+        ax=ax,
+        title="CompOSE free-energy closure diagnostics",
+    )
+
+
+def _plot_compose_closure_group(
+    plt: Any,
+    view: ThermodynamicView,
+    native: ThermodynamicSeries,
+    names: tuple[str, ...],
+    *,
+    ax: Axes | None,
+    title: str,
+) -> Axes:
     missing = [name for name in names if name not in native.column_names]
     if missing:
         raise EosInputError(
@@ -475,16 +558,31 @@ def plot_compose_closure_residuals(
         colors = (_BLUE, _ORANGE, _GREEN, _PURPLE, _SKY)
         styles = ("-", "--", ":", "-.", (0, (3, 1, 1, 1)))
         source_indices = _source_indices(native)
+        exact_zero_count = 0
         for index, name in enumerate(names):
+            values = native.column(name)
+            finite = values[np.isfinite(values)]
+            if np.any(finite < 0.0):
+                raise EosInputError(
+                    f"CompOSE normalized closure column {name} contains negative values"
+                )
+            exact_zero_count += int(np.count_nonzero(finite == 0.0))
+            plotted_values = np.where(values > 0.0, values, np.nan)
             ax.plot(
                 density,
-                native.column(name),
+                plotted_values,
                 color=colors[index],
                 linestyle=styles[index],
                 linewidth=1.7,
                 marker="o" if len(source_indices) else None,
-                markevery=source_indices.tolist() if len(source_indices) else None,
-                markersize=3.0,
+                markevery=_sparse_markevery(
+                    source_indices,
+                    maximum=36,
+                    offset=index % 2,
+                ),
+                markersize=2.6,
+                markerfacecolor="white",
+                markeredgewidth=0.7,
                 label=_CLOSURE_LABELS[name],
             )
         tolerance = COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE
@@ -496,10 +594,24 @@ def plot_compose_closure_residuals(
             label=f"diagnostic threshold ({tolerance:.0e})",
         )
         _set_positive_xscale(ax, [density])
-        ax.set_yscale("symlog", linthresh=tolerance / 10.0)
+        ax.set_yscale("log")
+        if exact_zero_count:
+            ax.text(
+                0.02,
+                0.03,
+                (
+                    f"Log magnitude; {exact_zero_count} exact-zero sample"
+                    f"{'s' if exact_zero_count != 1 else ''} omitted"
+                ),
+                transform=ax.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize="small",
+                color=_GREY,
+            )
         ax.set_xlabel(r"Baryon number density $n_B$ [fm$^{-3}$]")
-        ax.set_ylabel("Normalized closure residual")
-        ax.set_title(f"{view.model_name}: CompOSE closure diagnostics")
+        ax.set_ylabel("Normalized closure-residual magnitude")
+        ax.set_title(f"{view.model_name}: {title}")
         ax.legend(loc="best")
         _finish(ax)
         return ax
@@ -526,20 +638,53 @@ def plot_compose_cold_residuals(
         ax = _axes(plt, ax, figsize=(6.8, 4.4))
         density = native.column("baryon_density_fm3")
         source_indices = _source_indices(native)
-        for name, label, color, style in (
-            (names[0], r"$Q_5$ beta-equilibrium residual", _BLUE, "-"),
-            (names[1], r"$Q_6-Q_7$ zero-temperature residual", _ORANGE, "--"),
+        finite_residuals: list[np.ndarray] = []
+        summaries: list[str] = []
+        for index, (name, label, color, style, marker) in enumerate(
+            (
+                (
+                    names[0],
+                    r"$Q_5$ beta-equilibrium residual",
+                    _BLUE,
+                    "-",
+                    "o",
+                ),
+                (
+                    names[1],
+                    r"$Q_6-Q_7$ zero-temperature residual",
+                    _ORANGE,
+                    "--",
+                    "s",
+                ),
+            )
         ):
+            values = native.column(name)
+            finite = values[np.isfinite(values)]
+            finite_residuals.append(finite)
+            short_label = r"$Q_5$" if index == 0 else r"$Q_6-Q_7$"
+            if finite.size:
+                maximum = float(np.max(np.abs(finite)))
+                suffix = " (identically zero)" if maximum == 0.0 else ""
+                summaries.append(f"max |{short_label}| = {maximum:.2e}{suffix}")
+            else:
+                summaries.append(f"max |{short_label}| unavailable")
             ax.plot(
                 density,
-                native.column(name),
+                values,
                 color=color,
                 linestyle=style,
                 linewidth=1.8,
-                marker="o" if len(source_indices) else None,
-                markevery=source_indices.tolist() if len(source_indices) else None,
+                marker=marker if len(source_indices) else None,
+                markevery=_sparse_markevery(
+                    source_indices,
+                    maximum=36,
+                    offset=index,
+                ),
                 markersize=3.0,
+                markerfacecolor="white",
+                markeredgewidth=0.8,
                 label=label,
+                zorder=3 + index,
             )
         tolerance = COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE
         for sign in (-1.0, 1.0):
@@ -556,7 +701,31 @@ def plot_compose_cold_residuals(
             )
         ax.axhline(0.0, color=_GREY, linewidth=0.9)
         _set_positive_xscale(ax, [density])
-        ax.set_yscale("symlog", linthresh=tolerance / 10.0)
+        finite_values = np.concatenate(finite_residuals)
+        observed_minimum = float(np.min(finite_values)) if finite_values.size else 0.0
+        observed_maximum = float(np.max(finite_values)) if finite_values.size else 0.0
+        visible_minimum = min(-tolerance, observed_minimum)
+        visible_maximum = max(tolerance, observed_maximum)
+        padding = 0.06 * (visible_maximum - visible_minimum)
+        ax.set_yscale("linear")
+        ax.set_ylim(visible_minimum - padding, visible_maximum + padding)
+        ax.text(
+            0.02,
+            0.98,
+            "\n".join(summaries),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize="small",
+            color=_GREY,
+            bbox={
+                "boxstyle": "round,pad=0.25",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.82,
+            },
+            zorder=8,
+        )
         ax.set_xlabel(r"Baryon number density $n_B$ [fm$^{-3}$]")
         ax.set_ylabel("Dimensionless cold-condition residual")
         ax.set_title(f"{view.model_name}: CompOSE cold-condition diagnostics")
@@ -567,9 +736,20 @@ def plot_compose_cold_residuals(
 
 def _composition_label(name: str) -> str:
     if name.startswith("composition_pair_"):
-        return "pair code " + name.removeprefix("composition_pair_")
+        raw_code = name.removeprefix("composition_pair_")
+        try:
+            particle_code = int(raw_code)
+        except ValueError:
+            return f"source-defined particle (code {raw_code})"
+        species = _COMPOSE_PARTICLE_LABELS.get(particle_code)
+        if species is None:
+            return f"source-defined particle (code {particle_code})"
+        return f"{species} (code {particle_code})"
     if name.startswith("composition_quadruple_"):
-        return "particle-set " + name.removeprefix("composition_quadruple_")
+        remainder = name.removeprefix("composition_quadruple_")
+        group_code, separator, quantity = remainder.partition("_")
+        suffix = f": {quantity}" if separator else ""
+        return f"source-defined nuclear group (code {group_code}){suffix}"
     return name.replace("_", " ")
 
 
@@ -623,8 +803,11 @@ def plot_composition(
     with _style_context(plt):
         ax = _axes(plt, ax, figsize=(7.0, 4.6))
         density = native.column("baryon_density_fm3")
+        source_indices = _source_indices(native)
         partial = False
-        for name in selected:
+        markers = ("o", "s", "^", "D", "v", "P", "X", "*")
+        styles = ("-", "--", "-.", ":")
+        for index, name in enumerate(selected):
             values = native.column(name).copy()
             availability_name = f"{name}_available"
             if availability_name in native.column_names:
@@ -636,8 +819,16 @@ def plot_composition(
                 density,
                 values,
                 linewidth=1.7,
-                marker="o",
-                markersize=3.0,
+                linestyle=styles[index % len(styles)],
+                marker=markers[index % len(markers)] if len(source_indices) else None,
+                markevery=_sparse_markevery(
+                    source_indices,
+                    maximum=36,
+                    offset=index % 2,
+                ),
+                markersize=3.2,
+                markerfacecolor="white",
+                markeredgewidth=0.8,
                 label=_composition_label(name),
             )
         if partial:
@@ -655,7 +846,12 @@ def plot_composition(
         ax.set_xlabel(r"Baryon number density $n_B$ [fm$^{-3}$]")
         ax.set_ylabel("Source-defined composition quantity")
         ax.set_title(f"{view.model_name}: CompOSE composition")
-        ax.legend(loc="best", ncols=2 if len(selected) > 4 else 1)
+        ax.legend(
+            loc="center left",
+            bbox_to_anchor=(1.01, 0.5),
+            borderaxespad=0.0,
+            ncols=1,
+        )
         _finish(ax)
         return ax
 
@@ -983,6 +1179,7 @@ def plot_sequence_status(
 __all__ = [
     "plot_compose_closure_residuals",
     "plot_compose_cold_residuals",
+    "plot_compose_free_energy_closure_residuals",
     "plot_composition",
     "plot_mass_profile",
     "plot_mass_radius",

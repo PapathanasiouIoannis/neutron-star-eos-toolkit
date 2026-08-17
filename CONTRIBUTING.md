@@ -1,8 +1,8 @@
 # Contributing
 
-Thank you for improving the neutron-star EoS toolkit. The repository is
-currently a private pre-release, so contributions are coordinated with the
-repository owner and do not imply permission to redistribute the project.
+Thank you for improving the neutron-star EoS toolkit. Contributions are
+coordinated with the repository owner and are distributed under the project's
+MIT License.
 
 ## Development environment
 

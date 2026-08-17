@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 import numpy as np
@@ -7,10 +8,22 @@ import numpy as np
 from neutron_star_eos import (
     AnalyticalEos,
     EosDomainError,
+    EosInputError,
     StellarConfig,
     TabulatedEos,
     solve_sequence,
     solve_star,
+)
+from neutron_star_eos.stellar import (
+    FM3_M3,
+    GRAVITY_CONVERSION,
+    MEV_J,
+    NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2,
+    SOLAR_MASS_KG,
+    SOLAR_MASS_LENGTH_KM,
+    SPEED_OF_LIGHT_M_S,
+    STELLAR_CONSTANT_AUTHORITY,
+    STELLAR_CONSTANT_REFERENCE_URL,
 )
 
 K = 1.0e-3
@@ -39,13 +52,44 @@ def sampled_polytrope(points: int) -> TabulatedEos:
 
 
 class StellarTests(unittest.TestCase):
+    def test_tov_conversion_constants_follow_declared_compose_authority(self) -> None:
+        expected_gravity_conversion = (
+            4.0
+            * math.pi
+            * 1.0e9
+            * (MEV_J / FM3_M3)
+            / (SPEED_OF_LIGHT_M_S**2 * SOLAR_MASS_KG)
+        )
+        expected_solar_length = (
+            NEWTONIAN_GRAVITATIONAL_CONSTANT_M3_KG_S2
+            * SOLAR_MASS_KG
+            / SPEED_OF_LIGHT_M_S**2
+            / 1.0e3
+        )
+        self.assertEqual(GRAVITY_CONVERSION, expected_gravity_conversion)
+        self.assertEqual(SOLAR_MASS_LENGTH_KM, expected_solar_length)
+        self.assertAlmostEqual(GRAVITY_CONVERSION, 1.1266082139640147e-5)
+        self.assertAlmostEqual(SOLAR_MASS_LENGTH_KM, 1.4766251340718246)
+        serialized = solve_star(analytical_polytrope(), 100.0).to_dict()
+        constants = serialized["physical_constants"]
+        self.assertEqual(constants["authority"], STELLAR_CONSTANT_AUTHORITY)
+        self.assertEqual(constants["authority_url"], STELLAR_CONSTANT_REFERENCE_URL)
+        self.assertEqual(
+            constants["gravity_conversion_Msun_per_km3_per_MeV_fm3"],
+            GRAVITY_CONVERSION,
+        )
+        sequence_constants = solve_sequence(
+            analytical_polytrope(), [50.0, 100.0]
+        ).to_dict()["physical_constants"]
+        self.assertEqual(sequence_constants, constants)
+
     def test_preserved_background_regression_values(self) -> None:
         eos = analytical_polytrope()
         expected = {
-            50.0: (3.4870031312155505, 24.230455199462565),
-            100.0: (3.6724594285203196, 22.258559971427193),
-            150.0: (3.714225684192685, 21.106783795149045),
-            160.0: (3.716536224992158, 20.92585940641555),
+            50.0: (3.482875480314816, 24.202184966277226),
+            100.0: (3.6681122484640776, 22.23259039694679),
+            150.0: (3.7098290643979612, 21.082158025191987),
+            160.0: (3.712136870153775, 20.901444726084485),
         }
         for pressure, (mass, radius) in expected.items():
             star = solve_star(eos, pressure)
@@ -114,6 +158,35 @@ class StellarTests(unittest.TestCase):
             sequence.boundary_status,
             "truncated_at_eos_lower_pressure_not_vacuum",
         )
+
+    def test_background_diagnostic_integrates_acausal_region_explicitly(self) -> None:
+        eos = AnalyticalEos(
+            name="acausal-polytrope",
+            pressure_from_energy_density=lambda epsilon: (
+                2.0e-3 * np.asarray(epsilon) ** 2
+            ),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                4.0e-3 * np.asarray(epsilon)
+            ),
+            energy_density_domain_mev_fm3=(1.0, 400.0),
+            source="diagnostic acausal integration regression",
+        )
+        with self.assertRaises(EosInputError):
+            solve_star(eos, 320.0)
+
+        for route in ("radius", "log_pressure"):
+            eos.preferred_stellar_integration_variable = route
+            star = solve_star(
+                eos,
+                320.0,
+                validation_mode="background_diagnostic",
+                config=StellarConfig(radius_max_km=50.0),
+            )
+            self.assertGreater(star.mass_msun, 0.0)
+            self.assertGreater(star.radius_km, 0.0)
+            self.assertGreater(star.central_sound_speed_squared, 1.0)
+            self.assertEqual(star.eos_validation_status, "diagnostic_with_issues")
+            self.assertEqual(star.eos_validation_issues, ("acausal",))
 
     def test_default_sequence_stays_inside_a_narrow_domain(self) -> None:
         eos = AnalyticalEos(

@@ -26,6 +26,12 @@ from neutron_star_eos.compose.dataset import (
     ComposeThermodynamicRow,
     load_compose_dataset,
 )
+from neutron_star_eos.compose.mass_radius import (
+    COMPOSE_MASS_RADIUS_FORMAT_AUTHORITY,
+    COMPOSE_MASS_RADIUS_SCHEMA_VERSION,
+    ComposeMassRadiusReference,
+    load_compose_mass_radius_reference,
+)
 from neutron_star_eos.compose.thermodynamics import (
     COMPOSE_NATIVE_INTERPOLATION_POLICY,
     COMPOSE_NATIVE_THERMODYNAMIC_SCHEMA_VERSION,
@@ -41,6 +47,8 @@ __all__ = [
     "COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE",
     "COMPOSE_FORMAT_AUTHORITY",
     "COMPOSE_INTERPOLATION_POLICY",
+    "COMPOSE_MASS_RADIUS_FORMAT_AUTHORITY",
+    "COMPOSE_MASS_RADIUS_SCHEMA_VERSION",
     "COMPOSE_NATIVE_INTERPOLATION_POLICY",
     "COMPOSE_NATIVE_THERMODYNAMIC_SCHEMA_VERSION",
     "COMPOSE_ORDERING_POLICIES",
@@ -49,6 +57,7 @@ __all__ = [
     "ComposeDataset",
     "ComposeDiagnostic",
     "ComposeEos",
+    "ComposeMassRadiusReference",
     "ComposeOrderingIssue",
     "ComposeProfileDiagnostic",
     "ComposeSliceReport",
@@ -58,4 +67,5 @@ __all__ = [
     "interpolate_compose_thermodynamics",
     "load_compose_dataset",
     "load_compose_eos",
+    "load_compose_mass_radius_reference",
 ]
