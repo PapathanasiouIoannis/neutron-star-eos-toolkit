@@ -8,6 +8,8 @@ use them.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -22,6 +24,8 @@ ANALYTICAL_DERIVATIVE_RELATIVE_TOLERANCE = 2.0e-4
 ANALYTICAL_DERIVATIVE_ABSOLUTE_TOLERANCE = 2.0e-6
 ANALYTICAL_INVERSE_RELATIVE_TOLERANCE = 2.0e-8
 ANALYTICAL_INVERSE_ABSOLUTE_TOLERANCE = 2.0e-10
+ANALYTICAL_FINGERPRINT_GRID_POINTS = 2049
+ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS = 129
 
 
 class EosInputError(ValueError):
@@ -30,6 +34,19 @@ class EosInputError(ValueError):
 
 class EosDomainError(EosInputError):
     """Raised when an EoS is evaluated outside its declared domain."""
+
+
+def _eos_provenance_sha256(eos: "ColdBarotrope") -> str:
+    """Return one canonical identity for the exact declared EoS adapter."""
+
+    encoded = json.dumps(
+        eos.provenance(),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +172,9 @@ def _evaluate_user_function(
             [float(function(float(value))) for value in values.reshape(-1)], dtype=float
         ).reshape(values.shape)
     except (TypeError, ValueError, ArithmeticError) as exc:
-        raise EosInputError(f"analytical {name} could not evaluate the declared domain") from exc
+        raise EosInputError(
+            f"analytical {name} could not evaluate the declared domain"
+        ) from exc
     return result
 
 
@@ -212,10 +231,16 @@ class AnalyticalEos:
         endpoint_pressure = _evaluate_user_function(
             self._pressure, np.asarray([lower, upper]), name="pressure"
         )
-        if endpoint_pressure.shape != (2,) or not np.all(np.isfinite(endpoint_pressure)):
-            raise EosInputError("analytical pressure function must support a two-value array")
+        if endpoint_pressure.shape != (2,) or not np.all(
+            np.isfinite(endpoint_pressure)
+        ):
+            raise EosInputError(
+                "analytical pressure function must support a two-value array"
+            )
         if endpoint_pressure[0] <= 0.0 or endpoint_pressure[1] <= endpoint_pressure[0]:
-            raise EosInputError("analytical endpoint pressure must be positive and increasing")
+            raise EosInputError(
+                "analytical endpoint pressure must be positive and increasing"
+            )
         self.pressure_min_mev_fm3 = float(endpoint_pressure[0])
         self.pressure_max_mev_fm3 = float(endpoint_pressure[1])
 
@@ -231,7 +256,9 @@ class AnalyticalEos:
             raise EosInputError("analytical pressure returned invalid values")
         return _scalar_or_array(result, scalar)
 
-    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+    def sound_speed_squared_from_energy_density(
+        self, energy_density_mev_fm3: Any
+    ) -> Any:
         values, scalar = _domain_values(
             energy_density_mev_fm3,
             name="energy_density_mev_fm3",
@@ -264,7 +291,9 @@ class AnalyticalEos:
                     flat[index] = self.energy_density_max_mev_fm3
                 else:
                     flat[index] = brentq(
-                        lambda epsilon: float(self._pressure(epsilon)) - float(pressure),
+                        lambda epsilon, pressure=pressure: (
+                            float(self._pressure(epsilon)) - float(pressure)
+                        ),
                         self.energy_density_min_mev_fm3,
                         self.energy_density_max_mev_fm3,
                         xtol=5.0e-14,
@@ -272,9 +301,8 @@ class AnalyticalEos:
                     )
         if result.shape != values.shape or not np.all(np.isfinite(result)):
             raise EosInputError("analytical pressure inversion returned invalid values")
-        if (
-            np.any(result < self.energy_density_min_mev_fm3)
-            or np.any(result > self.energy_density_max_mev_fm3)
+        if np.any(result < self.energy_density_min_mev_fm3) or np.any(
+            result > self.energy_density_max_mev_fm3
         ):
             raise EosDomainError(
                 "analytical pressure inversion left the declared energy-density domain"
@@ -353,6 +381,37 @@ class AnalyticalEos:
         return replace(report, issues=tuple(issues))
 
     def provenance(self) -> dict[str, Any]:
+        epsilon = np.geomspace(
+            self.energy_density_min_mev_fm3,
+            self.energy_density_max_mev_fm3,
+            ANALYTICAL_FINGERPRINT_GRID_POINTS,
+        )
+        pressure = np.asarray(self.pressure_from_energy_density(epsilon), dtype=float)
+        cs2 = np.asarray(
+            self.sound_speed_squared_from_energy_density(epsilon), dtype=float
+        )
+        inverse_indices = np.linspace(
+            0,
+            len(epsilon) - 1,
+            ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS,
+            dtype=int,
+        )
+        inverse_pressure = pressure[inverse_indices]
+        recovered_epsilon = np.asarray(
+            self.energy_density_from_pressure(inverse_pressure), dtype=float
+        )
+        fingerprint = hashlib.sha256()
+        for name, values in (
+            ("energy_density_mev_fm3", epsilon),
+            ("pressure_mev_fm3", pressure),
+            ("sound_speed_squared", cs2),
+            ("inverse_pressure_mev_fm3", inverse_pressure),
+            ("recovered_energy_density_mev_fm3", recovered_epsilon),
+        ):
+            fingerprint.update(name.encode("ascii") + b"\0")
+            fingerprint.update(
+                np.ascontiguousarray(values, dtype="<f8").tobytes(order="C")
+            )
         return {
             "schema_version": EOS_INPUT_SCHEMA_VERSION,
             "adapter": "analytical_eos_v1",
@@ -367,6 +426,16 @@ class AnalyticalEos:
                 "pressure_max_MeV_fm3": self.pressure_max_mev_fm3,
             },
             "extrapolation": "forbidden",
+            "callable_fingerprint": {
+                "policy": "float64_le_sha256_forward_and_inverse_behavior_v2",
+                "forward_grid_points": ANALYTICAL_FINGERPRINT_GRID_POINTS,
+                "inverse_grid_points": ANALYTICAL_INVERSE_FINGERPRINT_GRID_POINTS,
+                "inverse_pressure_grid": (
+                    "forward-curve pressures at evenly spaced forward-grid indices"
+                ),
+                "sha256": fingerprint.hexdigest(),
+                "scope": "evaluated callable behavior, not source-code identity",
+            },
             "validation_policy": {
                 "analytical_grid_points_default": 2049,
                 "derivative_relative_tolerance": ANALYTICAL_DERIVATIVE_RELATIVE_TOLERANCE,
@@ -390,22 +459,27 @@ def _validate_eos_grid(
         raise ValueError("validation grid must contain at least 17 points")
     if not np.all(np.isfinite(epsilon)) or np.any(np.diff(epsilon) <= 0.0):
         raise ValueError("validation grid must be finite and strictly increasing")
-    if (
-        epsilon[0] != float(eos.energy_density_min_mev_fm3)
-        or epsilon[-1] != float(eos.energy_density_max_mev_fm3)
+    if epsilon[0] != float(eos.energy_density_min_mev_fm3) or epsilon[-1] != float(
+        eos.energy_density_max_mev_fm3
     ):
         raise ValueError("validation grid must include the exact declared endpoints")
     pressure = np.asarray(eos.pressure_from_energy_density(epsilon), dtype=float)
     cs2 = np.asarray(eos.sound_speed_squared_from_energy_density(epsilon), dtype=float)
     issues: list[EosValidationIssue] = []
     if not np.all(np.isfinite(pressure)) or not np.all(np.isfinite(cs2)):
-        issues.append(EosValidationIssue("nonfinite", "pressure or sound speed is nonfinite"))
+        issues.append(
+            EosValidationIssue("nonfinite", "pressure or sound speed is nonfinite")
+        )
     if np.any(pressure <= 0.0):
         issues.append(
             EosValidationIssue("nonpositive_pressure", "pressure must remain positive")
         )
     if np.any(np.diff(pressure) <= 0.0):
-        issues.append(EosValidationIssue("nonmonotone_pressure", "pressure must increase strictly"))
+        issues.append(
+            EosValidationIssue(
+                "nonmonotone_pressure", "pressure must increase strictly"
+            )
+        )
     if np.any(cs2 <= 0.0):
         issues.append(
             EosValidationIssue("mechanical_instability", "dP/dE must remain positive")

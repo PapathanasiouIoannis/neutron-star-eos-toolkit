@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 20
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -19,11 +20,47 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install .
+      - run: python -m pip install ".[notebook,notebook-test]"
       - run: python -m unittest discover -s tests -v
       - run: python examples/analytical.py
+      - run: python examples/tabulated.py
       - name: Probe the installed package outside the checkout
         working-directory: ${{ runner.temp }}
         run: |
+          eos-tool inspect "${{ github.workspace }}/examples/tabulated.csv" --kind csv
           eos-tool validate csv "${{ github.workspace }}/examples/tabulated.csv"
-          python -c "import neutron_star_eos; print(neutron_star_eos.__file__)"
+          python -c "from neutron_star_eos import EosModel, open_eos; import neutron_star_eos; print(neutron_star_eos.__file__)"
+
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install ".[dev,plot]"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m mypy src/neutron_star_eos
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install ".[dev]"
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - run: python -c "import glob, subprocess, sys; wheels=glob.glob('dist/*.whl'); assert len(wheels)==1; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]])"
+      - name: Probe the built wheel outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          eos-tool --version
+          eos-tool inspect "${{ github.workspace }}/examples/tabulated.csv" --kind csv
+          python -c "from neutron_star_eos import open_eos; model=open_eos(r'${{ github.workspace }}/examples/tabulated.csv', kind='csv'); print(model.solve_star(100.0).mass_msun)"

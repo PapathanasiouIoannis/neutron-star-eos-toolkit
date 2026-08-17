@@ -16,11 +16,16 @@ from neutron_star_eos import (
     EosDomainError,
     EosInputError,
     TabulatedEos,
+    build_compose_eos,
+    load_compose_dataset,
     load_compose_eos,
     load_csv_eos,
 )
 from neutron_star_eos.cli import main as eos_tool_main
-
+from neutron_star_eos.tabulated import (
+    _deduplicate_derived_validation_grid,
+    _validation_grid_with_exact_endpoints,
+)
 
 K = 1.0e-3
 
@@ -29,7 +34,9 @@ def analytical_polytrope() -> AnalyticalEos:
     return AnalyticalEos(
         name="test-polytrope",
         pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-        sound_speed_squared_from_energy_density=lambda epsilon: 2.0 * K * np.asarray(epsilon),
+        sound_speed_squared_from_energy_density=lambda epsilon: (
+            2.0 * K * np.asarray(epsilon)
+        ),
         energy_density_domain_mev_fm3=(1.0, 400.0),
         source="independent test definition P=K epsilon^2",
     )
@@ -46,6 +53,20 @@ def sampled_polytrope(points: int = 65) -> TabulatedEos:
 
 
 class EosInputTests(unittest.TestCase):
+    def test_derived_validation_grid_collapses_ulp_near_duplicates(self) -> None:
+        left = 9.307536220056526e-05
+        right = 9.307536220056534e-05
+        distinct = 1.0e-03
+        collapsed = _deduplicate_derived_validation_grid([distinct, right, left])
+        np.testing.assert_array_equal(collapsed, [left, distinct])
+        upper = 1607.1196094212467
+        grid = _validation_grid_with_exact_endpoints(
+            [right, distinct, 1607.1196094212464],
+            lower=left,
+            upper=upper,
+        )
+        np.testing.assert_array_equal(grid, [left, distinct, upper])
+
     def test_analytical_forward_inverse_validation_and_domain(self) -> None:
         eos = analytical_polytrope()
         epsilon = np.asarray([1.0, 10.0, 100.0, 400.0])
@@ -66,9 +87,9 @@ class EosInputTests(unittest.TestCase):
         eos = AnalyticalEos(
             name="scalar-functions",
             pressure_from_energy_density=lambda epsilon: K * float(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-            * K
-            * float(epsilon),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                2.0 * K * float(epsilon)
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="scalar-only test functions",
         )
@@ -82,8 +103,9 @@ class EosInputTests(unittest.TestCase):
         eos = AnalyticalEos(
             name="inconsistent-derivative",
             pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 0.1
-            * np.ones_like(np.asarray(epsilon, dtype=float)),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                0.1 * np.ones_like(np.asarray(epsilon, dtype=float))
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="deliberately inconsistent test definition",
         )
@@ -96,11 +118,12 @@ class EosInputTests(unittest.TestCase):
         bad_inverse = AnalyticalEos(
             name="inconsistent-inverse",
             pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
-            sound_speed_squared_from_energy_density=lambda epsilon: 2.0
-            * K
-            * np.asarray(epsilon),
-            energy_density_from_pressure=lambda pressure: 2.0
-            * np.ones_like(np.asarray(pressure, dtype=float)),
+            sound_speed_squared_from_energy_density=lambda epsilon: (
+                2.0 * K * np.asarray(epsilon)
+            ),
+            energy_density_from_pressure=lambda pressure: (
+                2.0 * np.ones_like(np.asarray(pressure, dtype=float))
+            ),
             energy_density_domain_mev_fm3=(1.0, 400.0),
             source="deliberately inconsistent test inverse",
         )
@@ -145,7 +168,9 @@ class EosInputTests(unittest.TestCase):
                     ["validate", "csv", str(path), "--format", "json"]
                 )
             self.assertEqual(status, 0)
-            self.assertEqual(json.loads(output.getvalue())["validation"]["status"], "pass")
+            self.assertEqual(
+                json.loads(output.getvalue())["validation"]["status"], "pass"
+            )
 
     def test_tabulated_input_fails_closed_without_repair(self) -> None:
         epsilon = np.asarray([1.0, 2.0, 3.0, 4.0])
@@ -277,10 +302,7 @@ class EosInputTests(unittest.TestCase):
         pressure = K * epsilon**2
 
         def row(index: int, q1: float, q3: float, q7: float) -> str:
-            return (
-                f"0 {index} 2 {q1:.17g} 0 {q3:.17g} 0 0 "
-                f"{q7:.17g} {q7:.17g} 1 42"
-            )
+            return f"0 {index} 2 {q1:.17g} 0 {q3:.17g} 0 0 {q7:.17g} {q7:.17g} 1 42"
 
         rows = []
         for index, density, eps, p in zip(range(5, 10), densities, epsilon, pressure):
@@ -316,10 +338,7 @@ class EosInputTests(unittest.TestCase):
             "eos.yq": "2\n2\n0.0\n",
             "eos.thermo": thermo + "\n",
             "eos.compo": "\n".join(
-                [
-                    f"0 {index} 2 {1 if index < 7 else 2} 0 0"
-                    for index in range(5, 10)
-                ]
+                [f"0 {index} 2 {1 if index < 7 else 2} 0 0" for index in range(5, 10)]
             )
             + "\n",
         }
@@ -329,17 +348,28 @@ class EosInputTests(unittest.TestCase):
                 for name, content in files.items():
                     archive.writestr(f"model/{name}", content)
             before = sorted(Path(temporary).iterdir())
-            eos = load_compose_eos(
+            dataset = load_compose_dataset(
                 archive_path,
                 model_id="synthetic-compose-polytrope",
                 source_url="https://example.invalid/compose-test",
+            )
+            cold_slice = dataset.cold_beta_equilibrium_slice(
+                matter="cold_beta_equilibrated",
+                includes_leptons=True,
+            )
+            self.assertEqual(cold_slice.additional_values[0], (42.0,))
+            self.assertTrue(cold_slice.report().continuous_barotrope_available)
+            eos = build_compose_eos(
+                dataset,
                 matter="cold_beta_equilibrated",
                 includes_leptons=True,
             )
             after = sorted(Path(temporary).iterdir())
             self.assertEqual(before, after)
             np.testing.assert_allclose(eos.baryon_density_fm3, densities)
-            np.testing.assert_allclose(eos.energy_density_mev_fm3, epsilon, rtol=2.0e-15)
+            np.testing.assert_allclose(
+                eos.energy_density_mev_fm3, epsilon, rtol=2.0e-15
+            )
             np.testing.assert_allclose(eos.pressure_mev_fm3, pressure, rtol=2.0e-15)
             np.testing.assert_allclose(
                 eos.baryon_chemical_potential_mev,
@@ -351,7 +381,9 @@ class EosInputTests(unittest.TestCase):
                 eos.compose_metadata["thermodynamic_duplicate_indices_last_row_wins"], 1
             )
             self.assertEqual(eos.compose_metadata["phase_code_rows_missing"], 0)
-            self.assertFalse(eos.compose_metadata["phase_codes_interpreted_as_discontinuities"])
+            self.assertFalse(
+                eos.compose_metadata["phase_codes_interpreted_as_discontinuities"]
+            )
             self.assertTrue(eos.validate(points=257).passed)
 
             directory_path = Path(temporary) / "compose-directory"
@@ -406,9 +438,14 @@ class EosInputTests(unittest.TestCase):
                     includes_leptons=True,
                 )
 
-            for label, token_index, replacement, message in (
-                ("not-beta-equilibrated", 7, "1e-4", "Q5 = 0"),
-                ("not-zero-temperature", 8, "1e-4", "Q6 = Q7"),
+            for label, token_index, replacement, diagnostic_code in (
+                ("beta-diagnostic", 7, "1e-4", "beta_equilibrium_Q5_residual"),
+                (
+                    "temperature-diagnostic",
+                    8,
+                    "1e-4",
+                    "zero_temperature_Q6_minus_Q7_residual",
+                ),
             ):
                 invalid_lines = thermo.splitlines()
                 invalid_tokens = invalid_lines[1].split()
@@ -420,14 +457,21 @@ class EosInputTests(unittest.TestCase):
                         if name == "eos.thermo":
                             content = "\n".join(invalid_lines) + "\n"
                         archive.writestr(f"model/{name}", content)
-                with self.assertRaisesRegex(EosInputError, message):
-                    load_compose_eos(
-                        invalid_archive,
-                        model_id=label,
-                        source_url="https://example.invalid/compose-test",
-                        matter="cold_beta_equilibrated",
-                        includes_leptons=True,
-                    )
+                diagnostic_dataset = load_compose_dataset(
+                    invalid_archive,
+                    model_id=label,
+                    source_url="https://example.invalid/compose-test",
+                )
+                diagnostic_slice = diagnostic_dataset.cold_beta_equilibrium_slice(
+                    matter="cold_beta_equilibrated",
+                    includes_leptons=True,
+                )
+                self.assertIn(
+                    diagnostic_code,
+                    {item.code for item in diagnostic_slice.report().diagnostics},
+                )
+                diagnostic_eos = build_compose_eos(diagnostic_slice)
+                self.assertTrue(diagnostic_eos.validate(points=257).passed)
 
     def test_compose_requires_explicit_physical_declarations(self) -> None:
         with self.assertRaisesRegex(EosInputError, "cold beta-equilibrated"):

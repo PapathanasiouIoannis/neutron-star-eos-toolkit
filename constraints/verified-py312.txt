@@ -1,0 +1,4 @@
+# Exact runtime versions used for the private 0.2.0 development line.
+# Apply with CPython 3.12; Python itself is managed outside this constraints file.
+numpy==1.26.4
+scipy==1.13.1

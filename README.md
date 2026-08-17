@@ -1,50 +1,95 @@
 # Neutron-star EoS toolkit
 
-A small Python toolkit for continuous, cold, one-fluid equations of state.
-It accepts:
+A small Python toolkit for inspecting cold one-fluid equations of state and,
+when the input supports it, calculating continuous source-boundary stellar
+backgrounds.
 
-- analytical functions;
-- ordinary CSV tables;
-- cold one-dimensional CompOSE directories or ZIP files.
+It accepts three deliberately separate input types:
 
-Every input declares a finite domain and is checked without sorting, clipping,
-repairing, extrapolating, or inventing missing physics.
+- analytical pressure and sound-speed functions;
+- ordinary CSV tables containing total energy density and pressure;
+- cold one-dimensional CompOSE directories or ZIP archives.
+
+The package never silently sorts, clips, smooths, repairs, extrapolates, or
+splices an input. A CompOSE source can provide useful native thermodynamics
+even when it cannot be reduced to one continuous stellar barotrope.
 
 ## Install
 
-Python 3.12 is currently the verified runtime.
+Python 3.12 is the verified runtime.
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install .
 ```
 
 On Linux or macOS:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/eos-tool validate csv examples/tabulated.csv
+.venv/bin/python -m pip install .
 ```
 
-## First two commands
+## Interactive experiments
 
-Validate the supplied CSV without running a stellar calculation:
+Install the optional notebook tools and open the guided experiment:
 
 ```powershell
-.\.venv\Scripts\eos-tool.exe validate csv .\examples\tabulated.csv
+.\.venv\Scripts\python.exe -m pip install -e ".[notebook]"
+.\.venv\Scripts\jupyter-lab.exe .\notebooks\eos_experiments.ipynb
 ```
 
-Run the toy analytical example end to end (it is an interface demonstration,
-not a realistic neutron-star EoS):
+The notebook runs with the supplied CSV by default. It can also load a user
+CSV, a CompOSE source, or the editable analytical definition in
+[`notebooks/analytical_eos.py`](notebooks/analytical_eos.py). That file holds
+the authoritative user function `P(epsilon)` and its consistent
+`dP/d(epsilon)`; the notebook handles inspection, plots, stellar calculations,
+and provenance.
+
+For a pinned, reproducible research example, the
+[cold CompOSE comparison campaign](experiments/compose_comparison/README.md)
+downloads and independently TOV-integrates eight core EoSs plus one hybrid
+stress test. It writes every plot to a separate PNG and cross-checks calculated
+curves against optional `eos.mr` references, current CompOSE catalogue values,
+and convention-aware primary literature.
+
+## First command
+
+Inspect the supplied CSV without running a stellar solver or writing files:
 
 ```powershell
-.\.venv\Scripts\python.exe .\examples\analytical.py
+.\.venv\Scripts\eos-tool.exe inspect .\examples\tabulated.csv --kind csv
 ```
 
-## Use your own CSV
+On Linux or macOS, use:
 
-Supply total energy density and pressure in MeV/fm^3, ordered from low to high:
+```bash
+.venv/bin/eos-tool inspect examples/tabulated.csv --kind csv
+```
+
+The report states independently whether the source, thermodynamics,
+continuous barotrope, stellar background, composition, and tidal operations
+are available.
+
+## Python API
+
+The beginner workflow has two entry points: `open_eos` for files and
+`EosModel.from_analytical` for functions.
+
+### Ordinary CSV
+
+```python
+from neutron_star_eos import open_eos
+
+model = open_eos("my_eos.csv", kind="csv")
+print(model.summary())
+
+star = model.solve_star(central_pressure_mev_fm3=100.0)
+print(star.mass_msun, star.radius_km, star.boundary_status)
+```
+
+CSV columns use total energy density and pressure in MeV/fm^3, ordered from
+low to high:
 
 ```text
 epsilon_mev_fm3,pressure_mev_fm3
@@ -54,56 +99,159 @@ epsilon_mev_fm3,pressure_mev_fm3
 400.0,160.0
 ```
 
+### Analytical expression
+
 ```python
-from neutron_star_eos import load_csv_eos, solve_star
+import numpy as np
+from neutron_star_eos import EosModel
 
-eos = load_csv_eos("my_eos.csv")
-eos.validate().require_pass()
-
-star = solve_star(eos, central_pressure_mev_fm3=100.0)
-print(star.mass_msun, star.radius_km)
+K = 1.0e-3
+model = EosModel.from_analytical(
+    name="example-polytrope",
+    pressure_from_energy_density=lambda epsilon: K * np.asarray(epsilon) ** 2,
+    sound_speed_squared_from_energy_density=lambda epsilon: 2 * K * np.asarray(epsilon),
+    energy_density_domain_mev_fm3=(1.0, 400.0),
+    source="educational example",
+)
+print(model.summary())
 ```
 
-## Use a CompOSE table
+The report fingerprints evaluated pressure and sound-speed values on a
+declared 2049-point grid and the recovered energy density on 129 corresponding
+pressure points. That identifies the assessed behavior of both the forward and
+inverse callables, not their source code, so keep the defining analytical
+script under version control alongside any result bundle.
 
-Version 1 accepts only continuous, cold, beta-equilibrated, one-dimensional
-stellar-matter tables whose CompOSE metadata confirm that leptons are present.
+### CompOSE source
+
+```python
+from neutron_star_eos import open_eos
+
+model = open_eos(
+    "path/to/eos.zip",
+    kind="compose",
+    model_id="catalogue model",
+    source_url="https://compose.obspm.fr/eos/...",
+    includes_leptons=True,
+)
+print(model.summary())
+profile = model.native_thermodynamics
+```
+
+CompOSE parsing, native-Q thermodynamics, and the optional continuous stellar
+barotrope are separate layers. A pressure reversal can make
+`continuous_barotrope` unavailable while `thermodynamics` remains available
+with diagnostics. See [the CompOSE guide](docs/compose.md) for the native
+quantities, density selection, and diagnostic ordering policies.
+
+`ComposeEos.pressure_from_baryon_density(...)` and
+`ComposeEos.baryon_density_from_pressure(...)` expose the declared native
+density coordinate without extrapolation, which is useful for controlled
+central-density experiments.
+
+## Plotting
+
+Plotting is optional and never runs a solver, repairs data, or writes files:
 
 ```powershell
-.\.venv\Scripts\eos-tool.exe validate compose path\to\eos.zip `
-  --model-id "catalogue model" `
-  --source-url "https://compose.obspm.fr/eos/..." `
-  --includes-leptons
+.\.venv\Scripts\python.exe -m pip install -e ".[plot]"
 ```
 
-See [the CompOSE guide](docs/compose.md) for the exact supported format and
-the optional explicit upper-density selection.
+```python
+import matplotlib.pyplot as plt
+from neutron_star_eos.plotting import plot_pressure_energy
+
+fig, ax = plt.subplots(constrained_layout=True)
+plot_pressure_energy(model, ax=ax)
+```
+
+Raw source nodes, native CompOSE thermodynamics, and evaluated continuous
+barotropes remain visually distinct. See the [plotting guide](docs/plotting.md).
+
+## Command line
+
+```text
+eos-tool inspect  PATH --kind csv|compose
+eos-tool star     PATH --kind csv|compose --central-pressure-mev-fm3 P
+eos-tool sequence PATH --kind csv|compose [--points N]
+```
+
+CompOSE commands additionally require `--model-id`, `--source-url`, and the
+explicit `--includes-leptons` declaration when applicable.
+
+Commands print results by default and write nothing. Add `--output NEW_DIR`
+to create a new deterministic bundle:
+
+```text
+NEW_DIR/
+├── summary.txt
+├── report.json
+├── thermodynamics.csv     inspect only, when thermodynamics are available
+├── star.json              one-star calculation
+└── sequence.json/.csv     sequence calculation
+```
+
+An existing output directory is never overwritten. Sequence tables retain
+every requested central pressure, including unavailable attempts and reasons.
+The default sequence uses 50 geometric central pressures across the declared
+pressure domain; an explicit `--points` value must be at least 9.
+
+Reports record the toolkit, Python, NumPy, and SciPy versions. Stellar JSON
+also records the exact ODE settings, validation mode, EoS provenance identity,
+source-boundary status, physical conversion constants and their authority, and
+any retained radial profile.
+
+The original `eos-tool validate csv|compose` syntax remains as a compatibility
+alias for existing scripts.
+
+## Capability meanings
+
+- `available`: the operation completed under its declared contract.
+- `available_with_diagnostics`: results are available and the named findings
+  remain visible.
+- `unavailable`: the operation was not authorized by the available evidence.
+- `not_applicable`: the input type does not define that quantity or operation.
+
+Availability is deliberately narrower than a claim of complete physical
+validity, numerical convergence, branch stability, or observational agreement.
 
 ## Scientific boundary
 
-The background solver stops at the EoS source's lowest positive pressure.
-Consequently, the reported mass and radius are **source-boundary values**, not
-silently vacuum `P=0` observables. Tidal observables, density jumps, maximum-mass claims,
-finite-temperature tables, automatic crust splicing, and two-fluid dark-matter
-stars are outside version 1 and fail closed rather than being approximated.
+The current stellar solver handles continuous background models only. It
+stops at the input's lowest selected positive pressure, so reported radii are
+source-boundary radii rather than silently claimed vacuum surfaces.
+
+Tidal observables, physical density jumps, maximum-mass claims,
+finite-temperature stellar reductions, automatic crust splicing, and
+two-fluid dark-matter stars are outside this release and remain unavailable.
 
 ## Repository map
 
 ```text
-src/neutron_star_eos/  public library
-examples/              one analytical example and one CSV
-docs/                  short format-specific guidance
-tests/                 compact interface and background-solver tests
+src/neutron_star_eos/  public package
+examples/              one runnable example per input type
+notebooks/             guided experiments and editable analytical definition
+experiments/           pinned, reproducible research campaigns
+docs/                  concise architecture and CompOSE guidance
+tests/                 synthetic interface and solver tests
 ```
 
-This clean toolkit deliberately contains no research campaigns, manuscripts,
-strict-run packets, publication figures, or private validation archive.
+See [the architecture map](docs/architecture.md) for the responsibility of
+every source file. Downloaded CompOSE archives and generated campaign data and
+figures remain local and ignored; the tracked campaign registry contains only
+source URLs, hashes, benchmark metadata, and reproducible code.
 
 ## Development
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-This is currently a private pre-release. A software license must be selected
-before public redistribution.
+The [parameter reference](docs/parameters.md),
+[diagnostic reference](docs/diagnostics.md), and
+[reproducibility guide](docs/reproducibility.md) describe the public contracts
+used by the CLI and notebook. See [CONTRIBUTING.md](CONTRIBUTING.md) before
+changing scientific behavior.
+
+This project is distributed under the [MIT License](LICENSE).

@@ -27,8 +27,58 @@ from neutron_star_eos.eos import (
     _validate_eos_grid,
 )
 
-
 TABULATED_INTERPOLATION_POLICY = "log_log_pchip_v1"
+
+
+def _deduplicate_derived_validation_grid(values: Any) -> np.ndarray:
+    """Collapse only ULP-near points introduced by validation arithmetic.
+
+    Source table nodes are validated separately and are never passed through
+    this helper.  Critical points are found in log space and then exponentiated;
+    a root that is mathematically an interval endpoint can consequently differ
+    from that endpoint by a handful of floating-point ULPs.  Keeping both points
+    creates a meaningless pressure-ordering comparison at effectively the same
+    energy density.
+    """
+
+    ordered = np.sort(np.asarray(values, dtype=float))
+    if ordered.ndim != 1 or not np.all(np.isfinite(ordered)):
+        raise ValueError("derived validation grid must be finite and one-dimensional")
+    retained: list[float] = []
+    relative_tolerance = 16.0 * np.finfo(float).eps
+    for raw_value in ordered:
+        value = float(raw_value)
+        if retained and math.isclose(
+            value,
+            retained[-1],
+            rel_tol=relative_tolerance,
+            abs_tol=0.0,
+        ):
+            continue
+        retained.append(value)
+    return np.asarray(retained, dtype=float)
+
+
+def _validation_grid_with_exact_endpoints(
+    interior_values: Any,
+    *,
+    lower: float,
+    upper: float,
+) -> np.ndarray:
+    grid = _deduplicate_derived_validation_grid(
+        np.concatenate(
+            (
+                np.asarray([lower], dtype=float),
+                np.asarray(interior_values, dtype=float),
+                np.asarray([upper], dtype=float),
+            )
+        )
+    )
+    grid[0] = lower
+    grid[-1] = upper
+    if np.any(np.diff(grid) <= 0.0):
+        raise ValueError("derived validation grid could not preserve exact endpoints")
+    return grid
 
 
 def _one_dimensional(name: str, values: Any) -> np.ndarray:
@@ -84,11 +134,17 @@ class TabulatedEos:
         epsilon = _one_dimensional("energy_density_mev_fm3", energy_density_mev_fm3)
         pressure = _one_dimensional("pressure_mev_fm3", pressure_mev_fm3)
         if epsilon.shape != pressure.shape:
-            raise EosInputError("energy-density and pressure columns must have equal length")
+            raise EosInputError(
+                "energy-density and pressure columns must have equal length"
+            )
         if np.any(epsilon <= 0.0) or np.any(pressure <= 0.0):
-            raise EosInputError("v1 tabulated energy density and pressure must be positive")
+            raise EosInputError(
+                "v1 tabulated energy density and pressure must be positive"
+            )
         if np.any(np.diff(epsilon) <= 0.0):
-            raise EosInputError("energy density must be supplied in strictly increasing order")
+            raise EosInputError(
+                "energy density must be supplied in strictly increasing order"
+            )
         if np.any(np.diff(pressure) <= 0.0):
             raise EosInputError(
                 "pressure must increase strictly; plateaus or jumps need explicit future support"
@@ -100,7 +156,9 @@ class TabulatedEos:
             if baryon_density.shape != epsilon.shape:
                 raise EosInputError("baryon-density column must match the table length")
             if np.any(baryon_density <= 0.0) or np.any(np.diff(baryon_density) <= 0.0):
-                raise EosInputError("baryon density must be positive and strictly increasing")
+                raise EosInputError(
+                    "baryon density must be positive and strictly increasing"
+                )
 
         self.model_name = name.strip()
         self.source = source.strip()
@@ -125,7 +183,9 @@ class TabulatedEos:
         self._log_pressure_from_log_epsilon = PchipInterpolator(
             log_epsilon, log_pressure, extrapolate=False
         )
-        self._dlog_pressure_dlog_epsilon = self._log_pressure_from_log_epsilon.derivative()
+        self._dlog_pressure_dlog_epsilon = (
+            self._log_pressure_from_log_epsilon.derivative()
+        )
 
     @staticmethod
     def _readonly_view(values: np.ndarray) -> np.ndarray:
@@ -170,7 +230,9 @@ class TabulatedEos:
             result,
         )
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("pressure interpolation left the declared table domain")
+            raise EosDomainError(
+                "pressure interpolation left the declared table domain"
+            )
         return _scalar_or_array(result, scalar)
 
     def energy_density_from_pressure(self, pressure_mev_fm3: Any) -> Any:
@@ -196,7 +258,7 @@ class TabulatedEos:
             interval = min(max(interval, 0), len(self._pressure_mev_fm3) - 2)
             target = math.log(float(pressure))
             root = brentq(
-                lambda log_epsilon: float(
+                lambda log_epsilon, target=target: float(
                     self._log_pressure_from_log_epsilon(log_epsilon) - target
                 ),
                 float(log_energy_nodes[interval]),
@@ -206,10 +268,14 @@ class TabulatedEos:
             )
             flat_result[output_index] = math.exp(root)
         if not np.all(np.isfinite(result)):
-            raise EosDomainError("energy-density interpolation left the declared table domain")
+            raise EosDomainError(
+                "energy-density interpolation left the declared table domain"
+            )
         return _scalar_or_array(result, scalar)
 
-    def sound_speed_squared_from_energy_density(self, energy_density_mev_fm3: Any) -> Any:
+    def sound_speed_squared_from_energy_density(
+        self, energy_density_mev_fm3: Any
+    ) -> Any:
         values, scalar = _domain_values(
             energy_density_mev_fm3,
             name="energy_density_mev_fm3",
@@ -217,7 +283,9 @@ class TabulatedEos:
             upper=self.energy_density_max_mev_fm3,
         )
         pressure = np.asarray(self.pressure_from_energy_density(values), dtype=float)
-        slope = np.asarray(self._dlog_pressure_dlog_epsilon(np.log(values)), dtype=float)
+        slope = np.asarray(
+            self._dlog_pressure_dlog_epsilon(np.log(values)), dtype=float
+        )
         result = pressure * slope / values
         if not np.all(np.isfinite(result)):
             raise EosInputError("sound-speed derivative is nonfinite")
@@ -272,18 +340,14 @@ class TabulatedEos:
             )
         )
         raw_validation_grid = np.exp(validation_logs)
-        interior_grid = np.unique(
-            raw_validation_grid[
-                (raw_validation_grid > self.energy_density_min_mev_fm3)
-                & (raw_validation_grid < self.energy_density_max_mev_fm3)
-            ]
-        )
-        validation_grid = np.concatenate(
-            (
-                np.asarray([self.energy_density_min_mev_fm3], dtype=float),
-                interior_grid,
-                np.asarray([self.energy_density_max_mev_fm3], dtype=float),
-            )
+        interior_grid = raw_validation_grid[
+            (raw_validation_grid > self.energy_density_min_mev_fm3)
+            & (raw_validation_grid < self.energy_density_max_mev_fm3)
+        ]
+        validation_grid = _validation_grid_with_exact_endpoints(
+            interior_grid,
+            lower=self.energy_density_min_mev_fm3,
+            upper=self.energy_density_max_mev_fm3,
         )
         return _validate_eos_grid(self, validation_grid)
 
