@@ -5,6 +5,7 @@ include SECURITY.md
 recursive-include docs *.md
 recursive-include examples *.csv *.py
 recursive-include notebooks *.ipynb *.py
+recursive-include workflows *.md *.py
 recursive-include constraints *.txt
 recursive-include src/neutron_star_eos/styles *.mplstyle
 global-exclude *-checkpoint.*

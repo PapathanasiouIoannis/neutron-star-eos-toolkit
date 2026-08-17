@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 notebook-output/
+/workflows/*.png
 uv.lock
 
 # Local CompOSE campaign inputs and generated artifacts. The tracked registry

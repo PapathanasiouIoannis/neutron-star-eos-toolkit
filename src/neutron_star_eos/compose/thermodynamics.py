@@ -10,146 +10,37 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
-from neutron_star_eos.compose.dataset import (
+from neutron_star_eos.compose.cold_slice import ComposeColdSlice
+from neutron_star_eos.compose.diagnostics import (
+    ComposeProfileDiagnostic,
+    normalized_residual,
+    profile_diagnostic,
+)
+from neutron_star_eos.compose.optional_fields import (
+    optional_source_fields,
+    sample_optional_field,
+)
+from neutron_star_eos.compose.profile import (
+    COMPOSE_NATIVE_INTERPOLATION_POLICY,
+    COMPOSE_NATIVE_THERMODYNAMIC_SCHEMA_VERSION,
+    Q_FIELDS,
+    ComposeThermodynamicProfile,
+    readonly_array,
+)
+from neutron_star_eos.compose.records import (
     COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
     COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
-    ComposeColdSlice,
 )
 from neutron_star_eos.eos import EosInputError
 
-COMPOSE_NATIVE_THERMODYNAMIC_SCHEMA_VERSION = "compose_native_thermodynamics_v1"
-COMPOSE_NATIVE_INTERPOLATION_POLICY = "piecewise_linear_native_Q_in_nB_v1"
-
-_Q_FIELDS = (
-    ("q1_pressure_per_baryon_mev", "MeV", "Q1 = P/nB"),
-    ("q2_entropy_per_baryon", "dimensionless", "Q2 = entropy per baryon"),
-    ("q3_mu_b_minus_mn_over_mn", "dimensionless", "Q3 = (muB-mn)/mn"),
-    ("q4_mu_q_over_mn", "dimensionless", "Q4 = muQ/mn"),
-    ("q5_mu_l_over_mn", "dimensionless", "Q5 = muL/mn"),
-    ("q6_free_energy_per_baryon_over_mn_minus_1", "dimensionless", "Q6 = F/mn-1"),
-    ("q7_internal_energy_per_baryon_over_mn_minus_1", "dimensionless", "Q7 = E/mn-1"),
-)
-
-
-def _readonly(values: Any, *, dtype: Any = float) -> np.ndarray:
-    result = np.asarray(values, dtype=dtype).copy()
-    result.setflags(write=False)
-    return result
-
-
-def _finite_range(values: np.ndarray) -> dict[str, float | None]:
-    finite = values[np.isfinite(values)]
-    if not len(finite):
-        return {"minimum": None, "maximum": None}
-    return {"minimum": float(np.min(finite)), "maximum": float(np.max(finite))}
-
-
-def _normalized_residual(residual: np.ndarray, *terms: np.ndarray) -> np.ndarray:
-    scale = np.maximum.reduce(tuple(np.abs(term) for term in terms))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(scale > 0.0, np.abs(residual) / scale, np.nan)
-
-
-@dataclass(frozen=True, slots=True)
-class ComposeProfileDiagnostic:
-    """One visible sampled-profile finding; never an automatic repair."""
-
-    code: str
-    severity: str
-    sampled_points: int
-    message: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "sampled_points": self.sampled_points,
-            "message": self.message,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ComposeThermodynamicProfile:
-    """Immutable native-Q interpolation and reconstructed thermodynamic table."""
-
-    model_id: str
-    source_url: str
-    columns: Mapping[str, np.ndarray]
-    units: Mapping[str, str]
-    descriptions: Mapping[str, str]
-    diagnostics: tuple[ComposeProfileDiagnostic, ...]
-    source_rows: int
-    provenance_json: str
-    interpolation_policy: str = COMPOSE_NATIVE_INTERPOLATION_POLICY
-
-    @property
-    def status(self) -> str:
-        return "available_with_diagnostics" if self.diagnostics else "available"
-
-    @property
-    def column_names(self) -> tuple[str, ...]:
-        return tuple(self.columns)
-
-    def column(self, name: str) -> np.ndarray:
-        try:
-            values = self.columns[name]
-        except KeyError as exc:
-            raise KeyError(f"unknown CompOSE profile column: {name}") from exc
-        result = values.view()
-        result.setflags(write=False)
-        return result
-
-    def summary(self) -> dict[str, Any]:
-        provenance = json.loads(self.provenance_json)
-        highlighted = (
-            "pressure_mev_fm3",
-            "energy_density_mev_fm3",
-            "baryon_chemical_potential_mev",
-            "sound_speed_squared_curve_derivative",
-            "sound_speed_squared_compose_thermodynamic",
-            "sound_speed_squared_cold_beta_mu_derivative",
-            "euler_normalized_residual",
-            "first_law_normalized_residual",
-            "gibbs_duhem_normalized_residual",
-        )
-        return {
-            "schema_version": COMPOSE_NATIVE_THERMODYNAMIC_SCHEMA_VERSION,
-            "status": self.status,
-            "model_id": self.model_id,
-            "source_url": self.source_url,
-            "source_rows": self.source_rows,
-            "profile_points": len(self.column("baryon_density_fm3")),
-            "columns": list(self.column_names),
-            "interpolation": {
-                "policy": self.interpolation_policy,
-                "coordinate": "baryon_density_fm3",
-                "native_fields": [name for name, _unit, _description in _Q_FIELDS],
-                "derivative_at_source_node": "right_interval_except_upper_endpoint",
-                "extrapolation": "forbidden",
-                "query_grid": provenance["query_grid"],
-            },
-            "official_cold_1d_quantities_not_applicable": {
-                "10": "dp/dnB at fixed energy requires a temperature dimension",
-                "11": "dp/dE at fixed nB requires a temperature dimension",
-                "13": "cV is not available from a one-point T=0 axis",
-                "14": "cP is not available from a one-point T=0 axis",
-                "16": "thermal expansion is not available from a one-point T=0 axis",
-                "17": "thermal pressure coefficient is not available from a one-point T=0 axis",
-            },
-            "ranges": {
-                name: {**_finite_range(self.columns[name]), "unit": self.units[name]}
-                for name in highlighted
-            },
-            "diagnostics": [item.to_dict() for item in self.diagnostics],
-            "provenance": provenance,
-        }
+# Historical explicit import retained for compatibility with the former
+# single-file implementation.  New code should use the public ``Q_FIELDS``.
+_Q_FIELDS = Q_FIELDS
 
 
 def _query_grid(
@@ -197,219 +88,6 @@ def _linear_fields(
         source_values[intervals] + (query - nodes[intervals])[:, None] * selected_slopes
     )
     return values, selected_slopes
-
-
-def _parse_composition_payload(
-    tokens: tuple[str, ...],
-) -> tuple[dict[int, float], dict[int, tuple[float, float, float]]]:
-    try:
-        pair_count = int(tokens[0])
-        if pair_count < 0:
-            raise ValueError
-        cursor = 1
-        pairs: dict[int, float] = {}
-        for _ in range(pair_count):
-            pairs[int(tokens[cursor])] = float(tokens[cursor + 1])
-            cursor += 2
-        quadruple_count = int(tokens[cursor])
-        cursor += 1
-        if quadruple_count < 0:
-            raise ValueError
-        quadruples: dict[int, tuple[float, float, float]] = {}
-        for _ in range(quadruple_count):
-            code = int(tokens[cursor])
-            quadruples[code] = (
-                float(tokens[cursor + 1]),
-                float(tokens[cursor + 2]),
-                float(tokens[cursor + 3]),
-            )
-            cursor += 4
-        if cursor != len(tokens):
-            raise ValueError
-    except (IndexError, ValueError) as exc:
-        raise EosInputError("CompOSE composition payload is malformed") from exc
-    return pairs, quadruples
-
-
-def _parse_microphysics(
-    cold_slice: ComposeColdSlice,
-) -> dict[tuple[int, int, int], dict[int, float]]:
-    if "eos.micro" not in cold_slice.dataset.available_files:
-        return {}
-    try:
-        lines = (
-            cold_slice.dataset.source_file_bytes("eos.micro")
-            .decode("ascii")
-            .splitlines()
-        )
-    except UnicodeDecodeError as exc:
-        raise EosInputError("CompOSE eos.micro is not ASCII") from exc
-    parsed: dict[tuple[int, int, int], dict[int, float]] = {}
-    for line_number, line in enumerate(lines, start=1):
-        tokens = line.split()
-        if not tokens:
-            continue
-        try:
-            key = (int(tokens[0]), int(tokens[1]), int(tokens[2]))
-            count = int(tokens[3])
-            if count < 0 or len(tokens) != 4 + 2 * count:
-                raise ValueError
-            values = {
-                int(tokens[4 + 2 * index]): float(tokens[5 + 2 * index])
-                for index in range(count)
-            }
-            if any(not math.isfinite(value) for value in values.values()):
-                raise ValueError
-        except (IndexError, ValueError) as exc:
-            raise EosInputError(
-                f"CompOSE eos.micro line {line_number} is malformed"
-            ) from exc
-        parsed[key] = values
-    return parsed
-
-
-def _optional_source_fields(
-    cold_slice: ComposeColdSlice,
-) -> tuple[dict[str, np.ndarray], dict[str, str], dict[str, str]]:
-    rows = cold_slice.rows
-    count = len(rows)
-    values: dict[str, np.ndarray] = {}
-    units: dict[str, str] = {}
-    descriptions: dict[str, str] = {}
-
-    maximum_additional_width = max(
-        (len(row.additional_values) for row in rows), default=0
-    )
-    for index in range(maximum_additional_width):
-        name = f"additional_{index + 1}"
-        values[name] = np.asarray(
-            [
-                row.additional_values[index]
-                if index < len(row.additional_values)
-                else np.nan
-                for row in rows
-            ]
-        )
-        units[name] = "source-defined"
-        descriptions[name] = (
-            f"CompOSE additional thermodynamic quantity {index + 1}; "
-            "missing source-row values remain NaN"
-        )
-
-    composition_map = {row.key: row for row in cold_slice.dataset.composition_rows}
-    parsed_composition = []
-    for row in rows:
-        source = composition_map.get(row.key)
-        parsed_composition.append(
-            ({}, {})
-            if source is None
-            else _parse_composition_payload(source.raw_payload_tokens)
-        )
-    pair_codes = sorted(
-        {code for pairs, _quads in parsed_composition for code in pairs}
-    )
-    for code in pair_codes:
-        name = f"composition_pair_{code}"
-        values[name] = np.asarray(
-            [pairs.get(code, np.nan) for pairs, _quads in parsed_composition]
-        )
-        units[name] = "dimensionless"
-        descriptions[name] = (
-            f"CompOSE composition pair quantity for particle code {code}"
-        )
-    quadruple_codes = sorted(
-        {code for _pairs, quadruples in parsed_composition for code in quadruples}
-    )
-    for code in quadruple_codes:
-        # eos.compo stores (Aav, Zav, Yav); the official output order is
-        # (Yav, Aav, Zav, Nav=Aav-Zav).
-        for component, label in enumerate(("Aav", "Zav", "Yav")):
-            name = f"composition_quadruple_{code}_{label}"
-            values[name] = np.asarray(
-                [
-                    quadruples.get(code, (np.nan, np.nan, np.nan))[component]
-                    for _pairs, quadruples in parsed_composition
-                ]
-            )
-            units[name] = "dimensionless"
-            descriptions[name] = (
-                f"CompOSE composition quadruple {label} for particle-set code {code}"
-            )
-        name = f"composition_quadruple_{code}_Nav"
-        values[name] = np.asarray(
-            [
-                (
-                    quadruples[code][0] - quadruples[code][1]
-                    if code in quadruples
-                    else np.nan
-                )
-                for _pairs, quadruples in parsed_composition
-            ]
-        )
-        units[name] = "dimensionless"
-        descriptions[name] = (
-            f"Calculated neutron number Aav-Zav for particle-set code {code}"
-        )
-
-    micro_map = _parse_microphysics(cold_slice)
-    micro_codes = sorted({code for row in rows for code in micro_map.get(row.key, {})})
-    for code in micro_codes:
-        name = f"micro_{code}"
-        values[name] = np.asarray(
-            [micro_map.get(row.key, {}).get(code, np.nan) for row in rows]
-        )
-        units[name] = "source-defined"
-        descriptions[name] = f"CompOSE microscopic quantity code {code}"
-
-    if cold_slice.phase_codes is not None:
-        values["phase_code"] = np.asarray(
-            [np.nan if item is None else float(item) for item in cold_slice.phase_codes]
-        )
-        units["phase_code"] = "model-specific code"
-        descriptions["phase_code"] = (
-            "Model-specific CompOSE phase code; not interpreted physically"
-        )
-    assert all(len(item) == count for item in values.values())
-    return values, units, descriptions
-
-
-def _sample_optional_field(
-    source: np.ndarray,
-    nodes: np.ndarray,
-    query: np.ndarray,
-    intervals: np.ndarray,
-    *,
-    piecewise_constant: bool,
-) -> np.ndarray:
-    if piecewise_constant:
-        result = source[intervals].copy()
-        result[query == nodes[-1]] = source[-1]
-    else:
-        left = source[intervals]
-        right = source[intervals + 1]
-        usable = np.isfinite(left) & np.isfinite(right)
-        fraction = (query - nodes[intervals]) / (
-            nodes[intervals + 1] - nodes[intervals]
-        )
-        result = np.where(usable, left + fraction * (right - left), np.nan)
-    positions = np.searchsorted(query, nodes)
-    valid = positions < len(query)
-    exact = np.zeros(len(nodes), dtype=bool)
-    exact[valid] = query[positions[valid]] == nodes[valid]
-    result[positions[exact]] = source[exact]
-    return result
-
-
-def _diagnostic(
-    code: str,
-    severity: str,
-    mask: np.ndarray,
-    message: str,
-) -> ComposeProfileDiagnostic | None:
-    count = int(np.count_nonzero(mask))
-    if not count:
-        return None
-    return ComposeProfileDiagnostic(code, severity, count, message)
 
 
 def interpolate_compose_thermodynamics(
@@ -477,17 +155,17 @@ def interpolate_compose_thermodynamics(
     gibbs_duhem_residual = dpressure_dn - query * dmu_b_dn
     free_pressure_residual = pressure - pressure_from_free_derivative
     free_mu_residual = mu_b - mu_b_from_free_derivative
-    euler_normalized = _normalized_residual(
+    euler_normalized = normalized_residual(
         euler_residual, pressure, query * mu_b, energy_density
     )
-    first_law_normalized = _normalized_residual(first_law_residual, denergy_dn, mu_b)
-    gibbs_duhem_normalized = _normalized_residual(
+    first_law_normalized = normalized_residual(first_law_residual, denergy_dn, mu_b)
+    gibbs_duhem_normalized = normalized_residual(
         gibbs_duhem_residual, dpressure_dn, query * dmu_b_dn
     )
-    free_pressure_normalized = _normalized_residual(
+    free_pressure_normalized = normalized_residual(
         free_pressure_residual, pressure, pressure_from_free_derivative
     )
-    free_mu_normalized = _normalized_residual(
+    free_mu_normalized = normalized_residual(
         free_mu_residual, mu_b, mu_b_from_free_derivative
     )
 
@@ -592,7 +270,7 @@ def interpolate_compose_thermodynamics(
         "cP and cV are not independently evaluated on a one-point T=0 axis"
     )
     descriptions["barotropic_adiabatic_index"] = "nB/P times dP/dnB"
-    for index, (name, unit, description) in enumerate(_Q_FIELDS):
+    for index, (name, unit, description) in enumerate(Q_FIELDS):
         columns[name] = q[:, index]
         columns[f"d{name}_dnB"] = dq_dn[:, index]
         units[name] = unit
@@ -600,11 +278,9 @@ def interpolate_compose_thermodynamics(
         descriptions[name] = description
         descriptions[f"d{name}_dnB"] = f"Native-density derivative of {description}"
 
-    optional, optional_units, optional_descriptions = _optional_source_fields(
-        cold_slice
-    )
+    optional, optional_units, optional_descriptions = optional_source_fields(cold_slice)
     for name, source_values in optional.items():
-        columns[name] = _sample_optional_field(
+        columns[name] = sample_optional_field(
             source_values,
             nodes,
             query,
@@ -639,97 +315,97 @@ def interpolate_compose_thermodynamics(
         for item in source_report.diagnostics
     )
     sampled_findings = (
-        _diagnostic(
+        profile_diagnostic(
             "sampled_pressure_nonpositive",
             "warning",
             pressure <= 0.0,
             "Reconstructed pressure is nonpositive at sampled profile points",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_pressure_gradient_nonpositive",
             "warning",
             dpressure_dn <= 0.0,
             "dP/dnB is nonpositive; the affected region remains visible",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_energy_gradient_nonpositive",
             "warning",
             denergy_dn <= 0.0,
             "d epsilon/dnB is nonpositive; the affected region remains visible",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_curve_sound_speed_nonpositive",
             "warning",
             cs2_curve <= 0.0,
             "The derivative of the reconstructed P(epsilon) curve is nonpositive",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_curve_sound_speed_acausal",
             "warning",
             cs2_curve > 1.0,
             "The derivative of the reconstructed P(epsilon) curve exceeds one",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_compose_sound_speed_nonpositive",
             "warning",
             cs2_compose <= 0.0,
             "The CompOSE thermodynamic sound-speed definition is nonpositive",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_compose_sound_speed_acausal",
             "warning",
             cs2_compose > 1.0,
             "The CompOSE thermodynamic sound-speed definition exceeds one",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_cold_beta_mu_sound_speed_nonpositive",
             "diagnostic",
             cs2_mu_derivative <= 0.0,
             "The cold-beta nB/muB dmuB/dnB sound-speed definition is nonpositive",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_cold_beta_mu_sound_speed_acausal",
             "diagnostic",
             cs2_mu_derivative > 1.0,
             "The cold-beta nB/muB dmuB/dnB sound-speed definition exceeds one",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_euler_residual_above_diagnostic_threshold",
             "diagnostic",
             euler_normalized > COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
             "Euler closure residual exceeds the declared diagnostic threshold",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_first_law_residual_above_diagnostic_threshold",
             "diagnostic",
             first_law_normalized > COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
             "d epsilon/dnB differs from the interpolated baryon chemical potential",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_gibbs_duhem_residual_above_diagnostic_threshold",
             "diagnostic",
             gibbs_duhem_normalized > COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
             "dP/dnB differs from nB dmuB/dnB",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_free_energy_pressure_residual_above_diagnostic_threshold",
             "diagnostic",
             free_pressure_normalized > COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
             "P differs from nB^2 d(F/A)/dnB under the native interpolation",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_free_energy_mu_residual_above_diagnostic_threshold",
             "diagnostic",
             free_mu_normalized > COMPOSE_EULER_DIAGNOSTIC_RELATIVE_TOLERANCE,
             "muB differs from F/A+nB d(F/A)/dnB under the native interpolation",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_q5_above_diagnostic_threshold",
             "diagnostic",
             np.abs(q[:, 4]) > COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
             "|Q5| exceeds the declared beta-equilibrium diagnostic threshold",
         ),
-        _diagnostic(
+        profile_diagnostic(
             "sampled_q6_minus_q7_above_diagnostic_threshold",
             "diagnostic",
             np.abs(q[:, 5] - q[:, 6]) > COMPOSE_COLD_DIAGNOSTIC_ABSOLUTE_TOLERANCE,
@@ -739,7 +415,7 @@ def interpolate_compose_thermodynamics(
     diagnostics.extend(item for item in sampled_findings if item is not None)
 
     immutable_columns = MappingProxyType(
-        {name: _readonly(value) for name, value in columns.items()}
+        {name: readonly_array(value) for name, value in columns.items()}
     )
     return ComposeThermodynamicProfile(
         model_id=cold_slice.dataset.model_id,

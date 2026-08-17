@@ -31,7 +31,11 @@ def load_acquisition_module() -> ModuleType:
         raise RuntimeError("cannot load CompOSE acquisition module")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(EXPERIMENT_ROOT))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(EXPERIMENT_ROOT))
     return module
 
 
@@ -55,6 +59,9 @@ def load_runner_module() -> ModuleType:
 
 
 runner = load_runner_module()
+campaign_figures = sys.modules["figures"]
+campaign_files = sys.modules["files"]
+campaign_provenance = sys.modules["provenance"]
 
 
 def deterministic_zip(member_names: tuple[str, ...]) -> bytes:
@@ -1043,7 +1050,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
 
             try:
                 with mock.patch.multiple(
-                    runner,
+                    campaign_figures,
                     DERIVED_ROOT=derived,
                     FIGURE_ROOT=figures,
                     _save_ax=mock.Mock(side_effect=capture),
@@ -1082,7 +1089,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
             (results / "user-note.txt").write_text("keep")
             manifest.write_text("{}")
             with mock.patch.multiple(
-                runner,
+                campaign_files,
                 DERIVED_ROOT=derived,
                 FIGURE_ROOT=figures,
                 RESULTS_ROOT=results,
@@ -1104,7 +1111,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
             selected.mkdir(parents=True)
             (selected / "do-not-delete.txt").write_text("user data")
             with mock.patch.multiple(
-                runner,
+                campaign_files,
                 DERIVED_ROOT=root / "derived",
                 FIGURE_ROOT=root / "figures",
                 RESULTS_ROOT=root / "results",
@@ -1189,7 +1196,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
                 {"slug": "bsk26", "archive": {"archive_filename": "archive.zip"}},
             )
             with mock.patch.multiple(
-                runner,
+                campaign_provenance,
                 DERIVED_ROOT=derived,
                 FIGURE_ROOT=figures,
                 RESULTS_ROOT=results,
@@ -1207,7 +1214,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
             code_paths = [item["path"] for item in manifest["exact_code_inputs"]]
             self.assertIn("experiments/compose_comparison/run.py", code_paths)
             self.assertIn("experiments/compose_comparison/acquire.py", code_paths)
-            self.assertTrue(any(path.endswith("stellar.py") for path in code_paths))
+            self.assertTrue(any(path.endswith("stellar/tov.py") for path in code_paths))
             self.assertFalse(
                 any(".ipynb_checkpoints" in Path(path).parts for path in code_paths)
             )

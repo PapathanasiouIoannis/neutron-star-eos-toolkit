@@ -38,6 +38,23 @@ class ExperimentNotebookTests(unittest.TestCase):
             self.assertIsNone(cell.execution_count)
             self.assertEqual(cell.outputs, [])
 
+        markdown = "\n".join(
+            cell.source for cell in notebook.cells if cell.cell_type == "markdown"
+        )
+        headings = (
+            "## 1. Quick start",
+            "## 2. Load the selected EoS",
+            "## 3. Thermodynamic validation",
+            "## 4. One-star TOV calculation",
+            "## 5. Mass–radius sequence",
+            "## 6. Optional advanced controls",
+            "## 7. Optional saving and provenance",
+        )
+        positions = [markdown.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("uv sync --all-extras", markdown)
+        self.assertIn("ipykernel install", markdown)
+
     def test_default_notebook_executes_headlessly_without_modifying_source(
         self,
     ) -> None:
