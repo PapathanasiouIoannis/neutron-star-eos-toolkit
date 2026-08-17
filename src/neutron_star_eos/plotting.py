@@ -833,14 +833,21 @@ def plot_composition(
             )
         if partial:
             ax.text(
-                0.02,
+                1.01,
                 0.03,
-                "Missing source coverage is retained as gaps",
+                "Gaps indicate missing\nsource coverage",
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
                 fontsize="small",
                 color=_VERMILLION,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.92,
+                    "pad": 2.5,
+                },
+                clip_on=False,
             )
         _set_positive_xscale(ax, [density])
         ax.set_xlabel(r"Baryon number density $n_B$ [fm$^{-3}$]")
@@ -890,16 +897,9 @@ def plot_phase_codes(
             ax.set_yticks(finite_codes)
         ax.set_xlabel(r"Baryon number density $n_B$ [fm$^{-3}$]")
         ax.set_ylabel("Model-specific phase code")
-        ax.set_title(f"{view.model_name}: uninterpreted CompOSE phase codes")
-        ax.text(
-            0.02,
-            0.97,
-            "Codes are displayed, not interpreted as physical transitions",
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize="small",
-            color=_GREY,
+        ax.set_title(
+            f"{view.model_name}: CompOSE phase codes\n"
+            "Source-defined codes; not interpreted as physical transitions"
         )
         _finish(ax)
         return ax

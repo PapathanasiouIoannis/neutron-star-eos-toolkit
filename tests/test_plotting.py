@@ -389,9 +389,15 @@ class PlottingTests(unittest.TestCase):
             view.series_for("native_thermodynamics").column("composition_pair_1"),
             before,
         )
-        self.assertTrue(any("retained as gaps" in text.get_text() for text in ax.texts))
+        disclosure = next(
+            text for text in ax.texts if "missing\nsource coverage" in text.get_text()
+        )
+        self.assertGreater(disclosure.get_position()[0], 1.0)
+        self.assertFalse(disclosure.get_clip_on())
+        self.assertIsNotNone(disclosure.get_bbox_patch())
         self.assertNotIn("fraction", ax.get_ylabel().lower())
         self.assertLessEqual(len(ax.lines[0].get_markevery()), 36)
+        ax.figure.canvas.draw()
 
     def test_composition_labels_verified_codes_and_marks_unknown_codes(self) -> None:
         ax = plot_composition(
@@ -415,9 +421,11 @@ class PlottingTests(unittest.TestCase):
 
     def test_phase_codes_are_explicitly_uninterpreted(self) -> None:
         ax = plot_phase_codes(compose_view())
-        self.assertIn("uninterpreted", ax.get_title().lower())
-        self.assertTrue(any("not interpreted" in text.get_text() for text in ax.texts))
+        self.assertIn("not interpreted", ax.get_title().lower())
+        self.assertIn("physical transitions", ax.get_title().lower())
+        self.assertFalse(ax.texts)
         self.assertTrue(np.isnan(np.asarray(ax.lines[0].get_ydata())[3]))
+        ax.figure.canvas.draw()
 
     def test_mass_profile_requires_retention_and_marks_source_boundary(self) -> None:
         with self.assertRaisesRegex(ValueError, "retain_profile=True"):

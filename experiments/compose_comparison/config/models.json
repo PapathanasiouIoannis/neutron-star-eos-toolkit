@@ -1,5 +1,5 @@
 {
-  "schema_version": "compose-comparison-model-registry-v1",
+  "schema_version": "compose-comparison-model-registry-v2",
   "campaign": {
     "name": "Cold CompOSE mass-radius comparison",
     "core_models": 8,
@@ -11,7 +11,7 @@
       "eos.yq",
       "eos.thermo"
     ],
-    "source_policy": "Stable Zenodo record downloads are authoritative for acquisition; current CompOSE pages and data sheets are authoritative for model identity and catalogue benchmarks.",
+    "source_policy": "Stable Zenodo record downloads are authoritative for acquisition; current CompOSE catalogue pages are authoritative for model identity and catalogue benchmarks.",
     "reference_policy": "eos.mr is an independent comparison source and is never TOV solver input.",
     "surface_policy": "Toolkit radii stop at the lowest retained positive source pressure and must not be relabelled as P=0 radii."
   },
@@ -417,6 +417,21 @@
         "radius_at_1_4_msun_km": 11.37,
         "source_url": "https://compose.obspm.fr/eos/68"
       },
+      "archive_metadata_findings": [
+        {
+          "classification": "stale_embedded_data_sheet_metadata",
+          "source_member": "eos.pdf",
+          "source_member_bytes": 58502,
+          "source_member_sha256": "b65ac6d1f90ffc6ce032a997f53200bc131de2e7dbe842921f21379f66510d38",
+          "declared_embedded_benchmark": {
+            "maximum_mass_msun": 2.17,
+            "radius_at_maximum_mass_km": 10.27,
+            "radius_at_1_4_msun_km": 11.33
+          },
+          "cause": "Undocumented upstream archive metadata staleness; not solver failure",
+          "interpretation": "The pinned archive's embedded eos.pdf reports older stellar benchmarks that disagree with the current CompOSE catalogue page and the same archive's numerical table and eos.mr. The exact PDF member identity is pinned here; it is provenance metadata only and is never solver input or acceptance authority."
+        }
+      ],
       "primary_citations": [
         {
           "label": "Akmal, Pandharipande, and Ravenhall (1998)",

@@ -94,6 +94,25 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
         return deterministic_zip((*self.required_members(), "eos.mr"))
 
     def test_registry_is_complete_pinned_and_convention_aware(self) -> None:
+        self.assertEqual(
+            self.config["schema_version"], "compose-comparison-model-registry-v2"
+        )
+        self.assertEqual(
+            acquire.REGISTRY_SCHEMA_VERSION,
+            "compose-comparison-model-registry-v2",
+        )
+        self.assertEqual(runner.RUN_SCHEMA_VERSION, "compose-comparison-run-v2")
+        self.assertEqual(
+            acquire.ACQUISITION_SCHEMA_VERSION,
+            "compose-comparison-acquisition-v1",
+        )
+        self.assertIn(
+            "current CompOSE catalogue pages",
+            self.config["campaign"]["source_policy"],
+        )
+        self.assertNotIn(
+            "data sheets are authoritative", self.config["campaign"]["source_policy"]
+        )
         models = self.config["models"]
         self.assertEqual(len(models), 9)
         self.assertEqual(
@@ -146,6 +165,17 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
             2.18,
         )
         self.assertFalse(by_slug["gm1y6"]["expected_optional_files"]["eos.mr"])
+        apr_metadata = by_slug["apr"]["archive_metadata_findings"]
+        self.assertEqual(len(apr_metadata), 1)
+        self.assertEqual(
+            apr_metadata[0]["classification"],
+            "stale_embedded_data_sheet_metadata",
+        )
+        self.assertEqual(apr_metadata[0]["source_member"], "eos.pdf")
+        self.assertEqual(
+            apr_metadata[0]["declared_embedded_benchmark"]["maximum_mass_msun"],
+            2.17,
+        )
         ordering_models = {
             slug: model["ordering_analysis"]
             for slug, model in by_slug.items()
@@ -205,6 +235,9 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
             self.assertEqual(second["status"], "verified_existing")
             self.assertEqual(sidecar.read_bytes(), first_sidecar)
             manifest = json.loads(first_sidecar)
+            self.assertEqual(
+                manifest["schema_version"], acquire.ACQUISITION_SCHEMA_VERSION
+            )
             self.assertFalse(manifest["determinism"]["retrieval_timestamp_recorded"])
             self.assertEqual(
                 manifest["verification"]["sha256"],
@@ -320,6 +353,14 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
                 with self.assertRaisesRegex(acquire.AcquisitionError, message):
                     acquire.validate_config(config)
 
+    def test_archive_metadata_registry_evidence_is_validated(self) -> None:
+        config = copy.deepcopy(self.config)
+        apr = next(model for model in config["models"] if model["slug"] == "apr")
+        finding = apr["archive_metadata_findings"][0]
+        finding["source_member_sha256"] = "not-a-digest"
+        with self.assertRaisesRegex(acquire.AcquisitionError, "source_member_sha256"):
+            acquire.validate_config(config)
+
 
 class ComposeCampaignHardeningTests(unittest.TestCase):
     @classmethod
@@ -333,6 +374,442 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
         self.assertFalse(runner._cs2_within_causal_threshold(1.0 + 2.0 * tolerance))
         self.assertFalse(runner._cs2_within_causal_threshold(0.0))
         self.assertFalse(runner._cs2_within_causal_threshold(float("nan")))
+
+    def test_causality_report_distinguishes_threshold_from_full_domain(self) -> None:
+        threshold = {
+            "status": "first_cs2_equals_one_threshold",
+            "mass_msun": 2.1516683,
+        }
+        full_domain = {
+            "status": "entire_selected_barotrope_has_positive_cs2_at_or_below_one",
+            "mass_msun": 1.9115855,
+        }
+        self.assertEqual(
+            runner._causality_report_text(threshold), "threshold 2.15167 Msun"
+        )
+        self.assertEqual(
+            runner._causality_report_text(full_domain), "full selected EoS causal"
+        )
+        self.assertIn("causal_endpoint_status", runner.SUMMARY_FIELDS)
+        summary = {
+            "slug": "synthetic",
+            "role": "core",
+            "model_id": "synthetic",
+            "metrics": {
+                "sampled_peak": {"mass_msun": 2.0, "radius_km": 10.0},
+                "at_1_4_msun": {"radius_km": 12.0},
+            },
+            "causal_endpoint": threshold,
+            "compose_catalogue_crosscheck": {
+                "passed": True,
+                "benchmark": {"radius_at_1_4_msun_km": 12.0},
+                "calculated_minus_benchmark": {
+                    "sampled_peak_mass_msun": 0.0,
+                    "radius_at_sampled_peak_km": 0.0,
+                    "radius_at_1_4_msun_km": 0.0,
+                },
+            },
+            "literature_crosscheck": {
+                "comparability": "like_for_like",
+                "numeric_checks": {},
+                "numeric_comparison_passed": True,
+                "acceptance_status": "passed_like_for_like",
+                "acceptance_gate_passed": True,
+            },
+            "ordering": {"sensitivity": None},
+            "eos_mr_source_consistency": {
+                "classification": "unavailable",
+                "material": False,
+                "catalogue_minus_reference_radius_at_1_4_msun_km": None,
+                "calculated_minus_reference_radius_at_1_4_msun_km": None,
+                "maximum_absolute_fixed_mass_radius_residual_km": None,
+                "rms_fixed_mass_radius_residual_km": None,
+                "acceptance_gate": False,
+            },
+            "closure_residual_diagnostics": {
+                "maximum_absolute_normalized_residual": {}
+            },
+            "non_gating_findings": {"archive_metadata_provenance": []},
+            "remaining_sequence_failures": 0,
+            "plots": {"required_coverage_passed": True},
+            "acceptance": {"passed": True},
+        }
+        self.assertEqual(
+            runner._summary_rows((summary,))[0]["causal_endpoint_status"],
+            "first_cs2_equals_one_threshold",
+        )
+        self.assertEqual(
+            runner._summary_rows((summary,))[0][
+                "eos_mr_source_consistency_classification"
+            ],
+            "unavailable",
+        )
+        self.assertFalse(
+            runner._summary_rows((summary,))[0]["eos_mr_material_discrepancy"]
+        )
+
+    def test_optional_reference_triangle_classifies_source_inconsistency(self) -> None:
+        cases = (
+            (
+                "fsu2h",
+                13.29,
+                13.126426193509479,
+                0.17267330861822217,
+                0.2517262194806662,
+                0.17497240404176917,
+                0.1635738064905201,
+            ),
+            (
+                "tw",
+                12.33,
+                12.001534133456373,
+                0.32735048931540334,
+                0.5238765571509152,
+                0.33779464538138554,
+                0.3284658665436275,
+            ),
+        )
+        for (
+            slug,
+            catalogue_radius,
+            reference_radius,
+            calculated_delta,
+            maximum,
+            rms,
+            expected_catalogue_delta,
+        ) in cases:
+            with self.subTest(slug=slug):
+                finding = runner._eos_mr_source_consistency(
+                    {
+                        "passed": True,
+                        "benchmark": {
+                            "radius_at_1_4_msun_km": catalogue_radius,
+                        },
+                        "calculated_minus_benchmark": {
+                            "radius_at_1_4_msun_km": (
+                                calculated_delta - expected_catalogue_delta
+                            )
+                        },
+                    },
+                    {"radius_at_1_4_msun_km": reference_radius},
+                    {
+                        "comparison_points": 6,
+                        "fixed_mass_comparisons": [
+                            {
+                                "mass_msun": 1.4,
+                                "calculated_minus_reference_radius_km": (
+                                    calculated_delta
+                                ),
+                            }
+                        ],
+                        "radius_residual_calculated_minus_reference_km": {
+                            "maximum_absolute": maximum,
+                            "rms": rms,
+                        },
+                    },
+                )
+                self.assertEqual(
+                    finding["classification"],
+                    "material_optional_reference_source_inconsistency",
+                )
+                self.assertTrue(finding["material"])
+                self.assertFalse(finding["acceptance_gate"])
+                self.assertTrue(finding["r1_4_triangle_complete"])
+                self.assertTrue(finding["source_attribution_condition_met"])
+                self.assertTrue(finding["calculated_minus_reference_r1_4_is_exact"])
+                self.assertAlmostEqual(
+                    finding["catalogue_minus_reference_radius_at_1_4_msun_km"],
+                    expected_catalogue_delta,
+                )
+                self.assertEqual(
+                    finding["maximum_absolute_fixed_mass_radius_residual_km"],
+                    maximum,
+                )
+                self.assertAlmostEqual(
+                    finding["calculated_minus_reference_radius_at_1_4_msun_km"],
+                    calculated_delta,
+                )
+                self.assertIn("not solver failure", finding["cause"])
+                report_line = runner._optional_reference_report_line(
+                    {"model_id": slug, "eos_mr_source_consistency": finding}
+                )
+                self.assertIn("MATERIAL OPTIONAL-REFERENCE", report_line)
+                self.assertIn(f"{maximum:.6f} km", report_line)
+
+    def test_optional_reference_triangle_handles_other_states(self) -> None:
+        catalogue = {
+            "passed": True,
+            "benchmark": {"radius_at_1_4_msun_km": 12.0},
+            "calculated_minus_benchmark": {"radius_at_1_4_msun_km": -0.01},
+        }
+        reference = {"radius_at_1_4_msun_km": 11.95}
+        comparison = {
+            "comparison_points": 1,
+            "fixed_mass_comparisons": [
+                {
+                    "mass_msun": 1.4,
+                    "calculated_minus_reference_radius_km": 0.04,
+                }
+            ],
+            "radius_residual_calculated_minus_reference_km": {
+                "maximum_absolute": 0.04,
+                "rms": 0.04,
+            },
+        }
+        self.assertEqual(
+            runner._eos_mr_source_consistency(catalogue, reference, comparison)[
+                "classification"
+            ],
+            "consistent",
+        )
+        failed_catalogue = {**catalogue, "passed": False}
+        self.assertEqual(
+            runner._eos_mr_source_consistency(failed_catalogue, reference, comparison)[
+                "classification"
+            ],
+            "indeterminate_calculation_catalogue_disagreement",
+        )
+        self.assertEqual(
+            runner._eos_mr_source_consistency(catalogue, None, None)["classification"],
+            "unavailable",
+        )
+        self.assertEqual(
+            runner._eos_mr_source_consistency(
+                catalogue,
+                reference,
+                {**comparison, "comparison_points": 0},
+            )["classification"],
+            "no_overlap",
+        )
+        self.assertTrue(runner._eos_mr_comparison_coverage(None))
+        self.assertTrue(runner._eos_mr_comparison_coverage(comparison))
+        self.assertFalse(
+            runner._eos_mr_comparison_coverage({**comparison, "comparison_points": 0})
+        )
+
+    def test_optional_reference_triangle_does_not_overattribute_discrepancies(
+        self,
+    ) -> None:
+        def classify(
+            *,
+            catalogue_radius: float,
+            reference_radius: float,
+            calculated_minus_catalogue: float | None,
+            fixed_r1_4_delta: float,
+            maximum: float,
+            passed: bool = True,
+        ) -> dict[str, Any]:
+            return runner._eos_mr_source_consistency(
+                {
+                    "passed": passed,
+                    "benchmark": {"radius_at_1_4_msun_km": catalogue_radius},
+                    "calculated_minus_benchmark": {
+                        "radius_at_1_4_msun_km": calculated_minus_catalogue
+                    },
+                },
+                {"radius_at_1_4_msun_km": reference_radius},
+                {
+                    "comparison_points": 2,
+                    "fixed_mass_comparisons": [
+                        {
+                            "mass_msun": 1.4,
+                            "calculated_minus_reference_radius_km": fixed_r1_4_delta,
+                        }
+                    ],
+                    "radius_residual_calculated_minus_reference_km": {
+                        "maximum_absolute": maximum,
+                        "rms": maximum / 2.0,
+                    },
+                },
+            )
+
+        cases = (
+            (
+                "catalogue_reference_material_but_calculation_reference_small",
+                classify(
+                    catalogue_radius=12.0,
+                    reference_radius=11.84,
+                    calculated_minus_catalogue=-0.15,
+                    fixed_r1_4_delta=0.01,
+                    maximum=0.16,
+                ),
+            ),
+            (
+                "calculation_reference_material_but_catalogue_reference_small",
+                classify(
+                    catalogue_radius=12.0,
+                    reference_radius=11.95,
+                    calculated_minus_catalogue=0.15,
+                    fixed_r1_4_delta=0.20,
+                    maximum=0.20,
+                ),
+            ),
+            (
+                "fixed_mass_material_but_r1_4_triangle_small",
+                classify(
+                    catalogue_radius=12.0,
+                    reference_radius=11.95,
+                    calculated_minus_catalogue=-0.01,
+                    fixed_r1_4_delta=0.04,
+                    maximum=0.20,
+                ),
+            ),
+            (
+                "material_fallback_without_exact_triangle",
+                classify(
+                    catalogue_radius=12.0,
+                    reference_radius=11.95,
+                    calculated_minus_catalogue=None,
+                    fixed_r1_4_delta=0.20,
+                    maximum=0.20,
+                ),
+            ),
+        )
+        for name, finding in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    finding["classification"],
+                    "material_optional_reference_discrepancy_unattributed",
+                )
+                self.assertTrue(finding["material"])
+                self.assertFalse(finding["source_attribution_condition_met"])
+                report_line = runner._optional_reference_report_line(
+                    {"model_id": name, "eos_mr_source_consistency": finding}
+                )
+                self.assertIn("UNATTRIBUTED", report_line)
+                self.assertIn(
+                    "no calculation, catalogue, or optional reference", report_line
+                )
+
+        failed = classify(
+            catalogue_radius=12.0,
+            reference_radius=11.7,
+            calculated_minus_catalogue=0.1,
+            fixed_r1_4_delta=0.4,
+            maximum=0.4,
+            passed=False,
+        )
+        self.assertEqual(
+            failed["classification"],
+            "indeterminate_calculation_catalogue_disagreement",
+        )
+        self.assertFalse(failed["source_attribution_condition_met"])
+
+    def test_campaign_interpretive_status_preserves_numerical_acceptance(self) -> None:
+        def summary(
+            *,
+            attributed: bool = False,
+            unattributed: bool = False,
+            archive: bool = False,
+        ) -> dict[str, Any]:
+            return {
+                "non_gating_findings": {
+                    "material_optional_reference_source_inconsistency": attributed,
+                    "material_optional_reference_discrepancy": (
+                        attributed or unattributed
+                    ),
+                    "archive_metadata_provenance": [{}] if archive else [],
+                }
+            }
+
+        self.assertEqual(
+            runner._campaign_interpretive_status((summary(),), campaign_passed=True),
+            "PASS",
+        )
+        for finding in (summary(attributed=True), summary(archive=True)):
+            self.assertEqual(
+                runner._campaign_interpretive_status((finding,), campaign_passed=True),
+                "PASS_WITH_MATERIAL_UPSTREAM_REFERENCE_FINDINGS",
+            )
+        self.assertEqual(
+            runner._campaign_interpretive_status(
+                (summary(unattributed=True),), campaign_passed=True
+            ),
+            "PASS_WITH_MATERIAL_UNATTRIBUTED_DIAGNOSTIC_FINDINGS",
+        )
+        self.assertEqual(
+            runner._campaign_interpretive_status(
+                (summary(attributed=True), summary(unattributed=True)),
+                campaign_passed=True,
+            ),
+            "PASS_WITH_MATERIAL_UPSTREAM_AND_UNATTRIBUTED_DIAGNOSTIC_FINDINGS",
+        )
+        self.assertEqual(
+            runner._campaign_interpretive_status(
+                (summary(attributed=True),), campaign_passed=False
+            ),
+            "FAIL",
+        )
+
+    def test_optional_reference_campaign_aggregate_separates_attribution(self) -> None:
+        attributed = {
+            "classification": "material_optional_reference_source_inconsistency",
+            "material": True,
+        }
+        neutral = {
+            "classification": "material_optional_reference_discrepancy_unattributed",
+            "material": True,
+        }
+        consistent = {"classification": "consistent", "material": False}
+        findings = runner._optional_reference_campaign_findings(
+            (
+                {"slug": "attributed", "eos_mr_source_consistency": attributed},
+                {"slug": "neutral", "eos_mr_source_consistency": neutral},
+                {"slug": "consistent", "eos_mr_source_consistency": consistent},
+            )
+        )
+        self.assertEqual(
+            set(findings["material_optional_reference_source_inconsistencies"]),
+            {"attributed"},
+        )
+        self.assertEqual(
+            set(findings["material_optional_reference_discrepancies"]),
+            {"attributed", "neutral"},
+        )
+        self.assertEqual(
+            set(findings["eos_mr_source_consistency"]),
+            {"attributed", "neutral", "consistent"},
+        )
+
+    def test_archive_metadata_finding_is_bound_to_exact_zip_member(self) -> None:
+        content = b"synthetic stale data sheet"
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "archive.zip"
+            with zipfile.ZipFile(archive, "w") as source:
+                source.writestr("eos.pdf", content)
+            spec = {
+                "slug": "synthetic",
+                "compose_benchmark": {
+                    "maximum_mass_msun": 2.19,
+                    "radius_at_maximum_mass_km": 9.97,
+                    "radius_at_1_4_msun_km": 11.37,
+                    "source_url": "https://example.invalid/eos",
+                },
+                "archive_metadata_findings": [
+                    {
+                        "classification": "stale_embedded_data_sheet_metadata",
+                        "source_member": "eos.pdf",
+                        "source_member_bytes": len(content),
+                        "source_member_sha256": hashlib.sha256(content).hexdigest(),
+                        "declared_embedded_benchmark": {
+                            "maximum_mass_msun": 2.17,
+                            "radius_at_maximum_mass_km": 10.27,
+                            "radius_at_1_4_msun_km": 11.33,
+                        },
+                        "cause": "undocumented; not solver failure",
+                        "interpretation": "non-gating synthetic evidence",
+                    }
+                ],
+            }
+            findings = runner._archive_metadata_findings(spec, archive)
+            self.assertEqual(len(findings), 1)
+            self.assertTrue(findings[0]["source_member"]["identity_verified"])
+            self.assertFalse(findings[0]["acceptance_gate"])
+            self.assertFalse(findings[0]["solver_input"])
+            report_line = runner._archive_metadata_report_line(
+                {"model_id": "synthetic"}, findings[0]
+            )
+            self.assertIn("Cause: undocumented; not solver failure.", report_line)
 
     def test_sequence_merge_deduplicates_machine_precision_grid_overlap(
         self,
@@ -527,6 +1004,62 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
         self.assertTrue(sly["acceptance_gate_passed"])
         self.assertEqual(sly["acceptance_status"], "not_gated_contextual")
 
+    def test_comparison_mass_radius_legend_is_outside_data_axes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            derived = root / "derived"
+            figures = root / "figures"
+            summaries: list[dict[str, Any]] = []
+            for index, slug in enumerate(("alpha", "beta")):
+                directory = derived / slug
+                directory.mkdir(parents=True)
+                (directory / "sequence.csv").write_text(
+                    "status,mass_msun,radius_km\n"
+                    f"solved,0.8,{14.0 + index}\n"
+                    f"solved,1.4,{12.0 + index}\n"
+                    f"solved,1.2,{11.0 + index}\n",
+                    encoding="utf-8",
+                )
+                summaries.append(
+                    {
+                        "slug": slug,
+                        "model_id": slug.upper(),
+                        "non_gating_findings": {
+                            "material_source_seam_systematic": index == 1
+                        },
+                        "compose_catalogue_crosscheck": {
+                            "calculated_minus_benchmark": {
+                                "sampled_peak_mass_msun": 0.0,
+                                "radius_at_sampled_peak_km": 0.0,
+                                "radius_at_1_4_msun_km": 0.0,
+                            }
+                        },
+                    }
+                )
+            captured: list[Any] = []
+
+            def capture(ax: Any, _path: Path) -> None:
+                captured.append(ax)
+
+            try:
+                with mock.patch.multiple(
+                    runner,
+                    DERIVED_ROOT=derived,
+                    FIGURE_ROOT=figures,
+                    _save_ax=mock.Mock(side_effect=capture),
+                ):
+                    result = runner._save_comparison_plots(summaries)
+                self.assertTrue(result["required_coverage_passed"])
+                mass_radius_ax = captured[0]
+                mass_radius_ax.figure.canvas.draw()
+                legend = mass_radius_ax.get_legend()
+                self.assertIsNotNone(legend)
+                renderer = mass_radius_ax.figure.canvas.get_renderer()
+                legend_bounds = legend.get_window_extent(renderer=renderer)
+                self.assertGreaterEqual(legend_bounds.x0, mass_radius_ax.bbox.x1)
+            finally:
+                runner.plt.close("all")
+
     def test_selected_output_cleanup_preserves_unselected_and_unknown_files(
         self,
     ) -> None:
@@ -597,6 +1130,7 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
             archive = directory / "archive.zip"
             archive.write_bytes(payload)
             sidecar = {
+                "schema_version": acquire.ACQUISITION_SCHEMA_VERSION,
                 "archive": {"local_filename": "archive.zip"},
                 "verification": {"bytes": len(payload), "sha256": digest},
             }
@@ -605,6 +1139,15 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
                 (model,), raw_root=raw, required_members=required
             )
             sidecar["verification"]["sha256"] = "0" * 64
+            (directory / "download.json").write_text(json.dumps(sidecar))
+            with self.assertRaisesRegex(
+                runner.AcquisitionError, "does not describe the pinned archive"
+            ):
+                runner._preflight_raw_inputs(
+                    (model,), raw_root=raw, required_members=required
+                )
+            sidecar["verification"]["sha256"] = digest
+            sidecar["schema_version"] = "compose-comparison-acquisition-v2"
             (directory / "download.json").write_text(json.dumps(sidecar))
             with self.assertRaisesRegex(
                 runner.AcquisitionError, "does not describe the pinned archive"
@@ -665,6 +1208,12 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
             self.assertIn("experiments/compose_comparison/run.py", code_paths)
             self.assertIn("experiments/compose_comparison/acquire.py", code_paths)
             self.assertTrue(any(path.endswith("stellar.py") for path in code_paths))
+            self.assertFalse(
+                any(".ipynb_checkpoints" in Path(path).parts for path in code_paths)
+            )
+            self.assertFalse(
+                any(Path(path).match("*-checkpoint.*") for path in code_paths)
+            )
             software = manifest["software"]
             self.assertEqual(
                 software["neutron_star_eos_toolkit"], runner.toolkit_version
@@ -676,6 +1225,27 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
                 constants["gravity_conversion_Msun_per_km3_per_MeV_fm3"],
                 runner.GRAVITY_CONVERSION,
             )
+
+    def test_canonical_code_input_excludes_jupyter_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "stellar.py"
+            hidden_checkpoint = root / ".ipynb_checkpoints" / "stellar.py"
+            named_checkpoint = root / "stellar-checkpoint.py"
+            style_checkpoint = root / "theme-checkpoint.mplstyle"
+            for path in (
+                canonical,
+                hidden_checkpoint,
+                named_checkpoint,
+                style_checkpoint,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# fixture\n")
+
+            self.assertTrue(runner._is_canonical_code_input(canonical))
+            self.assertFalse(runner._is_canonical_code_input(hidden_checkpoint))
+            self.assertFalse(runner._is_canonical_code_input(named_checkpoint))
+            self.assertFalse(runner._is_canonical_code_input(style_checkpoint))
 
 
 if __name__ == "__main__":

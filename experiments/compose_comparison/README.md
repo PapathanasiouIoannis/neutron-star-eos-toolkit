@@ -28,7 +28,7 @@ model-specific warnings, and primary references live in
 | core | `apr` | APR(APR) | 68 | 2.19 | 9.97 | 11.37 |
 | stress | `qhc19_c` | BFH(QHC19-C) | 151 | 2.18 | 10.80 | 11.60 |
 
-These are current CompOSE data-sheet values, not outputs from this toolkit.
+These are current CompOSE catalogue-page values, not outputs from this toolkit.
 Crust, causality, surface, and model-version conventions differ, so the
 registry's notes and citations must accompany comparisons.
 
@@ -67,11 +67,17 @@ Acquisition is fail-closed:
 - `download.json` contains deterministic source and verification provenance,
   without a run-time timestamp.
 
+The model registry and scientific-result contracts are version 2. The
+acquisition sidecar remains `compose-comparison-acquisition-v1` because its
+archive-provenance contract did not change; the runner explicitly validates
+that version during preflight, so the pinned existing sidecars remain valid.
+
 The live CompOSE download endpoints previously returned archives whose bytes
 did not agree with their adjacent checksum text files. Stable Zenodo records
 are therefore the acquisition authority for this campaign. The current
-CompOSE pages remain the authority for model identity, data sheets, and
-catalogue benchmark values.
+CompOSE pages remain the authority for model identity and catalogue benchmark
+values. Embedded descriptive files are retained as upstream provenance and may
+carry registry-declared non-gating metadata findings.
 
 ## Local directory contract
 
@@ -130,7 +136,10 @@ The full runner:
    the corresponding pre-peak side selected from `eos.mr` when it exists. This
    is an explicit numerical heuristic, not a stability inference. It then
    compares peak coordinates and fixed-mass radii with the current CompOSE
-   benchmark and convention-aware primary references in the registry.
+   benchmark and convention-aware primary references in the registry. A generic
+   triangle diagnostic classifies consistency among the calculated TOV result,
+   catalogue benchmark, and optional `eos.mr`; the reference never becomes an
+   acceptance gate.
 6. Reports hydrostatic sampled peaks separately from the numerically verified
    `c_s^2=1` threshold whenever the high-density source becomes acausal.
 7. Quantifies sensitivity between two declared positive source-node boundaries;
@@ -145,6 +154,28 @@ mass and 0.15 km for catalogue radii. RG(SLy4) may use a provisional 0.25 km
 radius tolerance until its source-boundary truncation is explicitly measured.
 Exceeding a tolerance triggers numerical, interpolation, domain, and surface
 investigation; it never triggers physics tuning or silent data repair.
+
+Optional `eos.mr` consistency uses a separate 0.15 km materiality threshold,
+which is a diagnostic classification threshold rather than an uncertainty or
+acceptance tolerance. `material_optional_reference_source_inconsistency` is
+assigned only when the independent TOV calculation passes the current CompOSE
+catalogue gate and both the absolute catalogue-minus-`eos.mr` and exact
+TOV-minus-`eos.mr` R1.4 differences exceed that threshold. Any material
+diagnostic without that complete corroborating triangle is classified as
+`material_optional_reference_discrepancy_unattributed`; no individual source
+vertex is blamed. A failed catalogue calculation is instead
+`indeterminate_calculation_catalogue_disagreement`; missing references and
+empty comparison domains have explicit states. Comparison coverage is an
+acceptance gate; numerical agreement with optional `eos.mr` is not. The FSU2H
+and TW source entries satisfy the full attribution rule and currently trigger
+the material source-inconsistency state. Their cause is undocumented and is not
+diagnosed as solver failure.
+
+The APR registry also pins a non-gating provenance finding to the exact
+embedded `eos.pdf` member. That archived document reports older stellar
+benchmarks (2.17 Msun, 10.27 km, 11.33 km) than the current catalogue page
+(2.19 Msun, 9.97 km, 11.37 km). The member hash is verified at run time; the
+document is never solver input or acceptance authority.
 
 For a registry-declared ordering seam, both diagnostic reductions must complete
 without sequence failures, cover 1.4 Msun, bracket the sampled peak, avoid
@@ -162,6 +193,14 @@ acceptance evidence, while `manifest.json` hashes every input and generated
 artifact. The runner exits nonzero if any catalogue, convergence, ordering,
 sequence-coverage, peak-bracketing, required-plot, or literature-comparison
 acceptance check fails.
+
+`acceptance.json` keeps the numerical `passed` boolean separate from
+`interpretive_status`. A numerically accepted campaign that contains a material
+attributed optional-reference or archive-metadata finding reports
+`PASS_WITH_MATERIAL_UPSTREAM_REFERENCE_FINDINGS` without converting the
+upstream diagnostic into a solver failure. A future neutral material diagnostic
+uses `PASS_WITH_MATERIAL_UNATTRIBUTED_DIAGNOSTIC_FINDINGS`; if both classes are
+present, the status names both.
 
 For GM1Y6, the bundled data sheet assigns the Douchin-Haensel crust below
 `nB=1e-3 fm^-3`, so the later core-side row is the primary conditional

@@ -23,7 +23,7 @@ from typing import Any
 EXPERIMENT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = EXPERIMENT_ROOT / "config" / "models.json"
 DEFAULT_RAW_ROOT = EXPERIMENT_ROOT / "data" / "raw"
-REGISTRY_SCHEMA_VERSION = "compose-comparison-model-registry-v1"
+REGISTRY_SCHEMA_VERSION = "compose-comparison-model-registry-v2"
 ACQUISITION_SCHEMA_VERSION = "compose-comparison-acquisition-v1"
 ORDERING_ACCEPTANCE_POLICY = (
     "both_diagnostic_reductions_complete_and_compose_catalogue_consistent"
@@ -148,6 +148,64 @@ def validate_config(payload: object) -> dict[str, Any]:
         ):
             _positive_number(benchmark.get(name), f"{slug}.compose_benchmark.{name}")
         _https(benchmark.get("source_url"), f"{slug}.compose_benchmark.source_url")
+        metadata_findings = model.get("archive_metadata_findings", [])
+        if not isinstance(metadata_findings, list):
+            raise AcquisitionError(f"{slug}.archive_metadata_findings must be a list")
+        metadata_members: set[str] = set()
+        for finding_index, finding_value in enumerate(metadata_findings):
+            finding_name = f"{slug}.archive_metadata_findings[{finding_index}]"
+            finding = _mapping(finding_value, finding_name)
+            if finding.get("classification") != "stale_embedded_data_sheet_metadata":
+                raise AcquisitionError(
+                    f"{finding_name}.classification must be "
+                    "'stale_embedded_data_sheet_metadata'"
+                )
+            member = finding.get("source_member")
+            if (
+                not isinstance(member, str)
+                or not member
+                or PurePosixPath(member).name != member
+            ):
+                raise AcquisitionError(f"{finding_name}.source_member is invalid")
+            if member in metadata_members:
+                raise AcquisitionError(
+                    f"{slug}.archive_metadata_findings repeats member {member}"
+                )
+            metadata_members.add(member)
+            member_bytes = finding.get("source_member_bytes")
+            if (
+                isinstance(member_bytes, bool)
+                or not isinstance(member_bytes, int)
+                or member_bytes <= 0
+            ):
+                raise AcquisitionError(
+                    f"{finding_name}.source_member_bytes must be a positive integer"
+                )
+            member_hash = finding.get("source_member_sha256")
+            if (
+                not isinstance(member_hash, str)
+                or _SHA256.fullmatch(member_hash) is None
+            ):
+                raise AcquisitionError(
+                    f"{finding_name}.source_member_sha256 must be a lowercase SHA-256"
+                )
+            embedded_benchmark = _mapping(
+                finding.get("declared_embedded_benchmark"),
+                f"{finding_name}.declared_embedded_benchmark",
+            )
+            for name in (
+                "maximum_mass_msun",
+                "radius_at_maximum_mass_km",
+                "radius_at_1_4_msun_km",
+            ):
+                _positive_number(
+                    embedded_benchmark.get(name),
+                    f"{finding_name}.declared_embedded_benchmark.{name}",
+                )
+            for name in ("cause", "interpretation"):
+                value = finding.get(name)
+                if not isinstance(value, str) or not value.strip():
+                    raise AcquisitionError(f"{finding_name}.{name} must be non-empty")
         citations = model.get("primary_citations")
         if not isinstance(citations, list) or not citations:
             raise AcquisitionError(f"{slug}.primary_citations must be non-empty")

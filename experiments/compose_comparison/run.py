@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import platform
 import shutil
 import subprocess
 import sys
+import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -23,12 +25,14 @@ from typing import Any
 
 import matplotlib
 import numpy as np
+from matplotlib.typing import RcKeyType
 from scipy import __version__ as scipy_version
 from scipy.optimize import brentq
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 from acquire import (  # type: ignore[import-not-found]
+    ACQUISITION_SCHEMA_VERSION,
     DEFAULT_CONFIG,
     DEFAULT_RAW_ROOT,
     AcquisitionError,
@@ -80,7 +84,7 @@ DERIVED_ROOT = EXPERIMENT_ROOT / "data" / "derived"
 FIGURE_ROOT = EXPERIMENT_ROOT / "figures"
 RESULTS_ROOT = EXPERIMENT_ROOT / "results"
 MANIFEST_PATH = EXPERIMENT_ROOT / "manifest.json"
-RUN_SCHEMA_VERSION = "compose-comparison-run-v1"
+RUN_SCHEMA_VERSION = "compose-comparison-run-v2"
 
 BASE_CONFIG = StellarConfig(
     radius_max_km=60.0,
@@ -104,6 +108,7 @@ PRESSURE_MERGE_RELATIVE_TOLERANCE = 64.0 * np.finfo(float).eps
 CAUSALITY_THRESHOLD_TOLERANCE = 1.0e-10
 REFERENCE_PEAK_EXCLUSION_MARGIN_MSUN = 0.05
 REFERENCE_FIXED_MASSES_MSUN = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0)
+OPTIONAL_REFERENCE_RADIUS_MATERIALITY_THRESHOLD_KM = 0.15
 ORDERING_ACCEPTANCE_POLICY = (
     "both_diagnostic_reductions_complete_and_compose_catalogue_consistent"
 )
@@ -706,6 +711,248 @@ def _comparison_to_reference(
     }
 
 
+def _eos_mr_source_consistency(
+    catalogue: Mapping[str, Any],
+    reference_metrics: Mapping[str, Any] | None,
+    reference_comparison: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify an optional ``eos.mr`` comparison without making it a gate."""
+
+    threshold = OPTIONAL_REFERENCE_RADIUS_MATERIALITY_THRESHOLD_KM
+    result: dict[str, Any] = {
+        "classification": "unavailable",
+        "classification_complete": True,
+        "material": False,
+        "acceptance_gate": False,
+        "basis": (
+            "triangle comparison among the independent toolkit TOV calculation, "
+            "the current CompOSE catalogue benchmark, and optional eos.mr"
+        ),
+        "thresholds": {
+            "radius_km": threshold,
+            "role": "diagnostic_materiality_threshold_not_uncertainty",
+            "source_attribution_rule": (
+                "both absolute catalogue-minus-reference and exact "
+                "calculated-minus-reference R1.4 differences must be strictly "
+                "greater than the threshold after the catalogue gate passes"
+            ),
+        },
+        "catalogue_gate_passed": bool(catalogue["passed"]),
+        "r1_4_triangle_complete": False,
+        "source_attribution_condition_met": False,
+        "catalogue_minus_reference_radius_at_1_4_msun_km": None,
+        "calculated_minus_reference_radius_at_1_4_msun_km": None,
+        "calculated_minus_reference_r1_4_is_exact": False,
+        "maximum_absolute_fixed_mass_radius_residual_km": None,
+        "rms_fixed_mass_radius_residual_km": None,
+        "threshold_exceeded_by": [],
+        "cause": None,
+        "interpretation": "optional eos.mr is not available for this source archive",
+    }
+    if reference_metrics is None:
+        return result
+
+    has_comparison_overlap = bool(
+        reference_comparison is not None
+        and int(reference_comparison.get("comparison_points", 0)) > 0
+    )
+
+    catalogue_radius = catalogue["benchmark"].get("radius_at_1_4_msun_km")
+    reference_radius = reference_metrics.get("radius_at_1_4_msun_km")
+    catalogue_minus_reference = (
+        None
+        if catalogue_radius is None or reference_radius is None
+        else float(catalogue_radius) - float(reference_radius)
+    )
+    calculated_minus_catalogue = catalogue.get("calculated_minus_benchmark", {}).get(
+        "radius_at_1_4_msun_km"
+    )
+    exact_calculated_minus_reference = (
+        None
+        if catalogue_minus_reference is None or calculated_minus_catalogue is None
+        else catalogue_minus_reference + float(calculated_minus_catalogue)
+    )
+    calculated_minus_reference = exact_calculated_minus_reference
+    if calculated_minus_reference is None:
+        fixed_rows = (
+            ()
+            if reference_comparison is None
+            else reference_comparison.get("fixed_mass_comparisons", ())
+        )
+        for row in fixed_rows:
+            if math.isclose(float(row["mass_msun"]), 1.4, rel_tol=0.0, abs_tol=1.0e-12):
+                calculated_minus_reference = float(
+                    row["calculated_minus_reference_radius_km"]
+                )
+                break
+    residuals = (
+        None
+        if reference_comparison is None
+        else reference_comparison.get("radius_residual_calculated_minus_reference_km")
+    )
+    maximum_absolute = None if residuals is None else residuals.get("maximum_absolute")
+    rms = None if residuals is None else residuals.get("rms")
+    exceeded_by: list[str] = []
+
+    def exceeds_threshold(value: Any) -> bool:
+        return value is not None and abs(float(value)) > threshold
+
+    if exceeds_threshold(catalogue_minus_reference):
+        exceeded_by.append("catalogue_minus_reference_radius_at_1_4_msun_km")
+    if exceeds_threshold(calculated_minus_reference):
+        exceeded_by.append("calculated_minus_reference_radius_at_1_4_msun_km")
+    if exceeds_threshold(maximum_absolute):
+        exceeded_by.append("maximum_absolute_fixed_mass_radius_residual_km")
+    if exceeds_threshold(rms):
+        exceeded_by.append("rms_fixed_mass_radius_residual_km")
+
+    triangle_complete = (
+        catalogue_minus_reference is not None
+        and exact_calculated_minus_reference is not None
+    )
+    attribution_condition_met = bool(
+        catalogue["passed"]
+        and triangle_complete
+        and exceeds_threshold(catalogue_minus_reference)
+        and exceeds_threshold(exact_calculated_minus_reference)
+    )
+
+    if not bool(catalogue["passed"]):
+        classification = "indeterminate_calculation_catalogue_disagreement"
+        material = bool(exceeded_by)
+        cause = (
+            "the calculation did not independently pass the catalogue gate, so no "
+            "optional-reference source attribution is permitted"
+        )
+        interpretation = (
+            "calculation-catalogue disagreement makes the optional-reference "
+            "diagnostics indeterminate and prevents identifying any inconsistent "
+            "source vertex"
+        )
+    elif attribution_condition_met:
+        classification = "material_optional_reference_source_inconsistency"
+        material = True
+        cause = "undocumented upstream/source-internal cause; not solver failure"
+        interpretation = (
+            "the independent toolkit TOV calculation passes the current CompOSE "
+            "catalogue gate while optional eos.mr disagrees beyond the diagnostic "
+            "materiality threshold; eos.mr was never solver input and the finding "
+            "does not fail calculation acceptance"
+        )
+    elif exceeded_by:
+        classification = "material_optional_reference_discrepancy_unattributed"
+        material = True
+        cause = (
+            "the complete corroborating exact R1.4 triangle required for source "
+            "attribution is absent or non-corroborating"
+        )
+        interpretation = (
+            "a material optional-reference diagnostic discrepancy is present, but "
+            "no individual triangle vertex is identified as its cause; the finding "
+            "is explicitly non-gating"
+        )
+    elif not has_comparison_overlap:
+        classification = "no_overlap"
+        material = False
+        cause = None
+        interpretation = (
+            "optional eos.mr is present, but no predeclared fixed-mass comparison "
+            "point lies in the common pre-peak mass domain"
+        )
+    else:
+        classification = "consistent"
+        material = False
+        cause = None
+        interpretation = (
+            "optional eos.mr is consistent with the independently catalogue-checked "
+            "toolkit calculation within the diagnostic materiality threshold"
+        )
+    result.update(
+        {
+            "classification": classification,
+            "material": material,
+            "r1_4_triangle_complete": triangle_complete,
+            "source_attribution_condition_met": attribution_condition_met,
+            "catalogue_minus_reference_radius_at_1_4_msun_km": (
+                catalogue_minus_reference
+            ),
+            "calculated_minus_reference_radius_at_1_4_msun_km": (
+                calculated_minus_reference
+            ),
+            "calculated_minus_reference_r1_4_is_exact": (
+                exact_calculated_minus_reference is not None
+            ),
+            "maximum_absolute_fixed_mass_radius_residual_km": maximum_absolute,
+            "rms_fixed_mass_radius_residual_km": rms,
+            "threshold_exceeded_by": exceeded_by,
+            "cause": cause,
+            "interpretation": interpretation,
+        }
+    )
+    return result
+
+
+def _eos_mr_comparison_coverage(
+    reference_comparison: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether an absent or present optional reference has usable coverage."""
+
+    return (
+        reference_comparison is None
+        or int(reference_comparison.get("comparison_points", 0)) > 0
+    )
+
+
+def _archive_metadata_findings(
+    spec: Mapping[str, Any], archive: Path
+) -> list[dict[str, Any]]:
+    """Verify and materialize registry-declared archive metadata findings."""
+
+    declarations = spec.get("archive_metadata_findings", [])
+    findings: list[dict[str, Any]] = []
+    if not declarations:
+        return findings
+    with zipfile.ZipFile(archive) as source:
+        for declaration in declarations:
+            member = str(declaration["source_member"])
+            try:
+                info = source.getinfo(member)
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"declared archive metadata member missing for {spec['slug']}: "
+                    f"{member}"
+                ) from exc
+            content = source.read(member)
+            digest = hashlib.sha256(content).hexdigest()
+            expected_bytes = int(declaration["source_member_bytes"])
+            expected_digest = str(declaration["source_member_sha256"])
+            if info.file_size != expected_bytes or digest != expected_digest:
+                raise RuntimeError(
+                    f"declared archive metadata evidence changed for {spec['slug']}: "
+                    f"{member}"
+                )
+            findings.append(
+                {
+                    "classification": declaration["classification"],
+                    "acceptance_gate": False,
+                    "solver_input": False,
+                    "source_member": {
+                        "name": member,
+                        "bytes": info.file_size,
+                        "sha256": digest,
+                        "identity_verified": True,
+                    },
+                    "declared_embedded_benchmark": dict(
+                        declaration["declared_embedded_benchmark"]
+                    ),
+                    "authoritative_compose_benchmark": dict(spec["compose_benchmark"]),
+                    "cause": declaration["cause"],
+                    "interpretation": declaration["interpretation"],
+                }
+            )
+    return findings
+
+
 def _sequence_rows(sequence: SequenceResult, eos: ComposeEos) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for attempt in sequence.attempts:
@@ -1090,6 +1337,7 @@ def _preflight_raw_inputs(
         sidecar = archive.parent / "download.json"
         try:
             payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            sidecar_schema = payload["schema_version"]
             sidecar_hash = payload["verification"]["sha256"]
             sidecar_bytes = payload["verification"]["bytes"]
             sidecar_filename = payload["archive"]["local_filename"]
@@ -1098,7 +1346,8 @@ def _preflight_raw_inputs(
                 f"{slug} acquisition sidecar is missing or malformed; run acquire.py"
             ) from exc
         if (
-            sidecar_hash != verification["sha256"]
+            sidecar_schema != ACQUISITION_SCHEMA_VERSION
+            or sidecar_hash != verification["sha256"]
             or sidecar_bytes != verification["bytes"]
             or sidecar_filename != archive.name
         ):
@@ -1125,7 +1374,7 @@ def _save_ax(ax: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _plot_style() -> dict[str, Any]:
+def _plot_style() -> dict[RcKeyType, Any]:
     return {
         "axes.grid": True,
         "grid.alpha": 0.25,
@@ -1427,7 +1676,7 @@ def _catalogue_check(
         and abs(delta_1_4) <= radius_tolerance
     )
     return {
-        "source": "current CompOSE catalogue/data sheet",
+        "source": "current CompOSE catalogue page",
         "benchmark": dict(benchmark),
         "calculated_minus_benchmark": {
             "sampled_peak_mass_msun": delta_mass,
@@ -1625,10 +1874,11 @@ def _ordering_analysis_assessment(
         classification = "within_nominal_delta_tolerance"
     else:
         classification = "material_source_seam_systematic"
-    conditional_span = (
-        None
-        if baseline_1_4 is None or alternative_1_4 is None
-        else {
+    conditional_span = None
+    if baseline_1_4 is not None and alternative_1_4 is not None:
+        if delta_r14 is None:
+            raise RuntimeError("ordering R1.4 delta is unexpectedly unavailable")
+        conditional_span = {
             "lower": min(
                 float(baseline_1_4["radius_km"]),
                 float(alternative_1_4["radius_km"]),
@@ -1639,7 +1889,6 @@ def _ordering_analysis_assessment(
             ),
             "span": abs(delta_r14),
         }
-    )
     reversals = ordering["expected_pressure_issues"]
     maximum_reversal = max(abs(float(item["relative_change"])) for item in reversals)
     return {
@@ -1869,6 +2118,10 @@ def _run_model(
     catalogue = _catalogue_check(spec, metrics)
     literature = _literature_check(spec, metrics)
     closure = _closure_diagnostics(view)
+    reference_consistency = _eos_mr_source_consistency(
+        catalogue, reference_metrics, reference_comparison
+    )
+    archive_metadata = _archive_metadata_findings(spec, archive)
     acceptance = {
         "catalogue": bool(catalogue["passed"]),
         "convention_classified_literature": bool(literature["acceptance_gate_passed"]),
@@ -1888,10 +2141,7 @@ def _run_model(
             causal.get("sound_speed_within_threshold_tolerance", False)
         ),
         "required_plot_coverage": bool(plots["required_coverage_passed"]),
-        "eos_mr_fixed_mass_coverage": (
-            reference_comparison is None
-            or int(reference_comparison["comparison_points"]) > 0
-        ),
+        "eos_mr_comparison_coverage": _eos_mr_comparison_coverage(reference_comparison),
     }
     acceptance["passed"] = all(acceptance.values())
     summary = {
@@ -1934,6 +2184,7 @@ def _run_model(
         "closure_residual_diagnostics": closure,
         "eos_mr_reference": reference_metrics,
         "eos_mr_crosscheck": reference_comparison,
+        "eos_mr_source_consistency": reference_consistency,
         "primary_citations": spec["primary_citations"],
         "analysis_notes": spec["analysis_notes"],
         "plots": plots,
@@ -1948,6 +2199,15 @@ def _run_model(
                 if ordering_sensitivity is None
                 else ordering_sensitivity["conditional_radius_span_at_1_4_msun_km"]
             ),
+            "eos_mr_source_consistency": reference_consistency,
+            "material_optional_reference_source_inconsistency": bool(
+                reference_consistency["classification"]
+                == "material_optional_reference_source_inconsistency"
+            ),
+            "material_optional_reference_discrepancy": bool(
+                reference_consistency["material"]
+            ),
+            "archive_metadata_provenance": archive_metadata,
         },
         "acceptance": acceptance,
         "interpretation": {
@@ -2000,7 +2260,12 @@ def _save_comparison_plots(summaries: Sequence[Mapping[str, Any]]) -> dict[str, 
         ax.set_xlabel("Source-boundary radius [km]")
         ax.set_ylabel(r"Gravitational mass [$M_\odot$]")
         ax.set_title("Calculated cold-CompOSE mass-radius comparison")
-        ax.legend(loc="best", ncols=2)
+        ax.legend(
+            loc="center left",
+            bbox_to_anchor=(1.01, 0.5),
+            borderaxespad=0.0,
+            ncols=1,
+        )
         _save_ax(ax, comparison / "all_calculated_mass_radius.png")
         created.append("all_calculated_mass_radius.png")
 
@@ -2056,6 +2321,7 @@ def _summary_rows(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         causal = item["causal_endpoint"]
         catalogue = item["compose_catalogue_crosscheck"]
         literature = item["literature_crosscheck"]
+        reference_consistency = item["eos_mr_source_consistency"]
         ordering_sensitivity = item["ordering"]["sensitivity"]
         ordering_span = (
             None
@@ -2079,6 +2345,7 @@ def _summary_rows(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                 "radius_at_1_4_msun_km": None
                 if at_1_4 is None
                 else at_1_4["radius_km"],
+                "causal_endpoint_status": causal["status"],
                 "causal_endpoint_mass_msun": causal.get("mass_msun"),
                 "causal_endpoint_density_fm3": causal.get("central_baryon_density_fm3"),
                 "catalogue_delta_peak_mass_msun": catalogue[
@@ -2091,6 +2358,30 @@ def _summary_rows(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                     "radius_at_1_4_msun_km"
                 ],
                 "catalogue_check_passed": catalogue["passed"],
+                "eos_mr_source_consistency_classification": (
+                    reference_consistency["classification"]
+                ),
+                "catalogue_minus_eos_mr_r1_4_km": reference_consistency[
+                    "catalogue_minus_reference_radius_at_1_4_msun_km"
+                ],
+                "calculated_minus_eos_mr_r1_4_km": reference_consistency[
+                    "calculated_minus_reference_radius_at_1_4_msun_km"
+                ],
+                "maximum_absolute_fixed_mass_eos_mr_radius_residual_km": (
+                    reference_consistency[
+                        "maximum_absolute_fixed_mass_radius_residual_km"
+                    ]
+                ),
+                "rms_fixed_mass_eos_mr_radius_residual_km": reference_consistency[
+                    "rms_fixed_mass_radius_residual_km"
+                ],
+                "eos_mr_source_consistency_acceptance_gate": reference_consistency[
+                    "acceptance_gate"
+                ],
+                "eos_mr_material_discrepancy": reference_consistency["material"],
+                "archive_metadata_provenance_finding_count": len(
+                    item["non_gating_findings"]["archive_metadata_provenance"]
+                ),
                 "ordering_sensitivity_classification": (
                     None
                     if ordering_sensitivity is None
@@ -2141,12 +2432,21 @@ SUMMARY_FIELDS = (
     "sampled_peak_mass_msun",
     "radius_at_sampled_peak_km",
     "radius_at_1_4_msun_km",
+    "causal_endpoint_status",
     "causal_endpoint_mass_msun",
     "causal_endpoint_density_fm3",
     "catalogue_delta_peak_mass_msun",
     "catalogue_delta_peak_radius_km",
     "catalogue_delta_r1_4_km",
     "catalogue_check_passed",
+    "eos_mr_source_consistency_classification",
+    "catalogue_minus_eos_mr_r1_4_km",
+    "calculated_minus_eos_mr_r1_4_km",
+    "maximum_absolute_fixed_mass_eos_mr_radius_residual_km",
+    "rms_fixed_mass_eos_mr_radius_residual_km",
+    "eos_mr_source_consistency_acceptance_gate",
+    "eos_mr_material_discrepancy",
+    "archive_metadata_provenance_finding_count",
     "ordering_sensitivity_classification",
     "ordering_conditional_r1_4_span_km",
     "ordering_analysis_acceptance_gate_passed",
@@ -2221,19 +2521,175 @@ def _ordering_systematic_report_line(item: Mapping[str, Any]) -> str | None:
     )
 
 
-def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
+def _optional_reference_report_line(item: Mapping[str, Any]) -> str | None:
+    finding = item["eos_mr_source_consistency"]
+    classification = finding["classification"]
+    if classification not in {
+        "material_optional_reference_source_inconsistency",
+        "material_optional_reference_discrepancy_unattributed",
+    }:
+        return None
+    catalogue_delta = _report_number(
+        finding["catalogue_minus_reference_radius_at_1_4_msun_km"]
+    )
+    calculated_delta = _report_number(
+        finding["calculated_minus_reference_radius_at_1_4_msun_km"]
+    )
+    maximum = _report_magnitude(
+        finding["maximum_absolute_fixed_mass_radius_residual_km"]
+    )
+    rms = _report_magnitude(finding["rms_fixed_mass_radius_residual_km"])
+    diagnostics = (
+        f"catalogue-minus-reference R1.4={catalogue_delta} km, "
+        f"calculated-minus-reference R1.4={calculated_delta} km, "
+        f"maximum fixed-mass |delta R|={maximum} km, and RMS fixed-mass "
+        f"delta R={rms} km"
+    )
+    if classification == "material_optional_reference_discrepancy_unattributed":
+        return (
+            f"- **{item['model_id']}: MATERIAL OPTIONAL-REFERENCE DISCREPANCY "
+            f"(UNATTRIBUTED).** The diagnostics report {diagnostics}. The complete "
+            "corroborating exact R1.4 triangle required for source attribution is "
+            "absent or non-corroborating, so no calculation, catalogue, or optional "
+            "reference vertex is identified as the cause. The finding is "
+            "explicitly non-gating."
+        )
+    return (
+        f"- **{item['model_id']}: MATERIAL OPTIONAL-REFERENCE SOURCE "
+        "INCONSISTENCY.** The toolkit TOV sequence independently passes the "
+        "current CompOSE catalogue check, while the same entry's optional "
+        f"`eos.mr` differs by {diagnostics}. `eos.mr` was never solver input and "
+        "this finding "
+        "does not fail calculation acceptance. CompOSE documents no convention "
+        "that resolves the source-internal mismatch; cause undocumented, not "
+        "solver failure."
+    )
+
+
+def _archive_metadata_report_line(
+    item: Mapping[str, Any], finding: Mapping[str, Any]
+) -> str:
+    embedded = finding["declared_embedded_benchmark"]
+    authoritative = finding["authoritative_compose_benchmark"]
+    member = finding["source_member"]
+    return (
+        f"- **{item['model_id']}**: pinned `{member['name']}` "
+        f"({member['bytes']} bytes; SHA-256 `{member['sha256']}`) declares "
+        f"Mmax={float(embedded['maximum_mass_msun']):.2f} Msun, "
+        f"R(Mmax)={float(embedded['radius_at_maximum_mass_km']):.2f} km, and "
+        f"R1.4={float(embedded['radius_at_1_4_msun_km']):.2f} km, whereas the "
+        f"registry-pinned current CompOSE page reports "
+        f"{float(authoritative['maximum_mass_msun']):.2f} Msun, "
+        f"{float(authoritative['radius_at_maximum_mass_km']):.2f} km, and "
+        f"{float(authoritative['radius_at_1_4_msun_km']):.2f} km. "
+        f"{finding['interpretation']} Cause: {finding['cause']}."
+    )
+
+
+def _report_number(value: Any) -> str:
+    return "n/a" if value is None else f"{float(value):+.6f}"
+
+
+def _report_magnitude(value: Any) -> str:
+    return "n/a" if value is None else f"{float(value):.6f}"
+
+
+def _causality_report_text(causal: Mapping[str, Any]) -> str:
+    status = str(causal["status"])
+    mass = causal.get("mass_msun")
+    if status == "first_cs2_equals_one_threshold":
+        return "threshold n/a" if mass is None else f"threshold {float(mass):.5f} Msun"
+    if status == "entire_selected_barotrope_has_positive_cs2_at_or_below_one":
+        return "full selected EoS causal"
+    if status == "no_causal_prefix":
+        return "no causal prefix"
+    if status == "last_sample_before_nonpositive_sound_speed":
+        return (
+            "causal-prefix endpoint n/a"
+            if mass is None
+            else f"causal-prefix endpoint {float(mass):.5f} Msun"
+        )
+    return f"unrecognized status: {status}"
+
+
+def _campaign_interpretive_status(
+    summaries: Sequence[Mapping[str, Any]], *, campaign_passed: bool
+) -> str:
+    if not campaign_passed:
+        return "FAIL"
+    has_material_upstream_reference_finding = any(
+        bool(
+            item["non_gating_findings"][
+                "material_optional_reference_source_inconsistency"
+            ]
+        )
+        or bool(item["non_gating_findings"]["archive_metadata_provenance"])
+        for item in summaries
+    )
+    has_material_unattributed_diagnostic = any(
+        bool(item["non_gating_findings"]["material_optional_reference_discrepancy"])
+        and not bool(
+            item["non_gating_findings"][
+                "material_optional_reference_source_inconsistency"
+            ]
+        )
+        for item in summaries
+    )
+    if has_material_upstream_reference_finding and has_material_unattributed_diagnostic:
+        return "PASS_WITH_MATERIAL_UPSTREAM_AND_UNATTRIBUTED_DIAGNOSTIC_FINDINGS"
+    if has_material_upstream_reference_finding:
+        return "PASS_WITH_MATERIAL_UPSTREAM_REFERENCE_FINDINGS"
+    if has_material_unattributed_diagnostic:
+        return "PASS_WITH_MATERIAL_UNATTRIBUTED_DIAGNOSTIC_FINDINGS"
+    return "PASS"
+
+
+def _optional_reference_campaign_findings(
+    summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Collect all optional-reference states and their material subsets."""
+
+    consistency = {
+        str(item["slug"]): item["eos_mr_source_consistency"] for item in summaries
+    }
+    return {
+        "eos_mr_source_consistency": consistency,
+        "material_optional_reference_source_inconsistencies": {
+            slug: finding
+            for slug, finding in consistency.items()
+            if finding["classification"]
+            == "material_optional_reference_source_inconsistency"
+        },
+        "material_optional_reference_discrepancies": {
+            slug: finding
+            for slug, finding in consistency.items()
+            if bool(finding["material"])
+        },
+    }
+
+
+def _write_report(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    campaign_passed: bool,
+    interpretive_status: str,
+) -> None:
     lines = [
         "# Cold CompOSE comparison results",
         "",
         "All primary mass-radius curves below were calculated by the toolkit's TOV solver. Optional `eos.mr` files were used only after calculation as independent references.",
         "",
-        "| Model | Sampled peak [Msun] | R(peak) [km] | R1.4 [km] | Causal-domain limit [Msun] | Catalogue | Ordering seam | Literature convention |",
-        "|---|---:|---:|---:|---:|---|---|---|",
+        f"Numerical campaign acceptance: **{'PASS' if campaign_passed else 'FAIL'}**. "
+        f"Interpretive status: `{interpretive_status}`. Material interpretive "
+        "findings remain explicitly non-gating.",
+        "",
+        "| Model | Sampled peak [Msun] | R(peak) [km] | R1.4 [km] | Causality check | Catalogue | Ordering seam | Literature convention |",
+        "|---|---:|---:|---:|---|---|---|---|",
     ]
     for item in summaries:
         peak = item["metrics"]["sampled_peak"]
         at_1_4 = item["metrics"]["at_1_4_msun"]
-        causal_mass = item["causal_endpoint"].get("mass_msun")
+        causal_text = _causality_report_text(item["causal_endpoint"])
         literature = item["literature_crosscheck"]
         sensitivity = item["ordering"]["sensitivity"]
         ordering_status = (
@@ -2251,7 +2707,7 @@ def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
         lines.append(
             f"| {item['model_id']} | {peak['mass_msun']:.5f} | {peak['radius_km']:.4f} | "
             f"{radius_1_4_text} | "
-            f"{'n/a' if causal_mass is None else f'{causal_mass:.5f}'} | "
+            f"{causal_text} | "
             f"{'PASS' if item['compose_catalogue_crosscheck']['passed'] else 'FAIL'} | "
             f"{ordering_status} | "
             f"{literature['comparability']} ({literature['acceptance_status']}) |"
@@ -2271,6 +2727,55 @@ def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
             "certify a unique crust-core radius or a physical seam construction.",
             "",
             *ordering_lines,
+        )
+    )
+    optional_reference_lines = [
+        line
+        for item in summaries
+        if (line := _optional_reference_report_line(item)) is not None
+    ]
+    lines.extend(
+        (
+            "",
+            "## Optional eos.mr consistency diagnostics",
+            "",
+            "The 0.15 km threshold below classifies material diagnostic "
+            "disagreement; it is not an uncertainty or an acceptance tolerance. "
+            "A source inconsistency is assigned only when the independent toolkit "
+            "calculation first passes the current CompOSE catalogue gate and both "
+            "catalogue-minus-reference and exact calculated-minus-reference R1.4 "
+            "differences strictly exceed that threshold. Other material diagnostics "
+            "remain unattributed.",
+            "",
+            "| Model | Classification | Catalogue - eos.mr R1.4 [km] | TOV - eos.mr R1.4 [km] | Maximum fixed-mass abs(delta R) [km] | RMS fixed-mass delta R [km] |",
+            "|---|---|---:|---:|---:|---:|",
+        )
+    )
+    for item in summaries:
+        finding = item["eos_mr_source_consistency"]
+        lines.append(
+            f"| {item['model_id']} | {finding['classification']} | "
+            f"{_report_number(finding['catalogue_minus_reference_radius_at_1_4_msun_km'])} | "
+            f"{_report_number(finding['calculated_minus_reference_radius_at_1_4_msun_km'])} | "
+            f"{_report_magnitude(finding['maximum_absolute_fixed_mass_radius_residual_km'])} | "
+            f"{_report_magnitude(finding['rms_fixed_mass_radius_residual_km'])} |"
+        )
+    lines.extend(("", *optional_reference_lines))
+
+    archive_metadata_lines = [
+        _archive_metadata_report_line(item, finding)
+        for item in summaries
+        for finding in item["non_gating_findings"]["archive_metadata_provenance"]
+    ]
+    lines.extend(
+        (
+            "",
+            "## Archive-metadata provenance findings",
+            "",
+            "These exact-member findings disclose stale upstream descriptive "
+            "metadata. They are not solver inputs or calculation acceptance gates.",
+            "",
+            *(archive_metadata_lines or ["- None."]),
         )
     )
     lines.extend(
@@ -2412,10 +2917,7 @@ def _manifest(
     source_root = repository_root / "src" / "neutron_star_eos"
     code_paths.extend(
         sorted(
-            path
-            for path in source_root.rglob("*")
-            if path.is_file()
-            and (path.suffix in {".py", ".mplstyle"} or path.name == "py.typed")
+            path for path in source_root.rglob("*") if _is_canonical_code_input(path)
         )
     )
     unique_code_paths = tuple(dict.fromkeys(path.resolve() for path in code_paths))
@@ -2472,6 +2974,17 @@ def _manifest(
             "files": files,
             "raw_archives_relicensed_under_mit": False,
         },
+    )
+
+
+def _is_canonical_code_input(path: Path) -> bool:
+    """Return whether *path* is a canonical, executable package input."""
+
+    return (
+        path.is_file()
+        and ".ipynb_checkpoints" not in path.parts
+        and not path.match("*-checkpoint.*")
+        and (path.suffix in {".py", ".mplstyle"} or path.name == "py.typed")
     )
 
 
@@ -2576,6 +3089,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         and item["ordering"]["sensitivity"]["classification"]
         == "material_source_seam_systematic"
     }
+    optional_reference_findings = _optional_reference_campaign_findings(summaries)
+    archive_metadata_findings = {
+        str(item["slug"]): item["non_gating_findings"]["archive_metadata_provenance"]
+        for item in summaries
+        if item["non_gating_findings"]["archive_metadata_provenance"]
+    }
+    interpretive_status = _campaign_interpretive_status(
+        summaries, campaign_passed=campaign_passed
+    )
     _write_json(
         RESULTS_ROOT / "acceptance.json",
         {
@@ -2584,12 +3106,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "comparison_plots": comparison_plots,
             "campaign_gates": campaign_gates,
             "non_gating_findings": {
-                "material_source_seam_systematics": material_seam_findings
+                "material_source_seam_systematics": material_seam_findings,
+                **optional_reference_findings,
+                "archive_metadata_provenance": archive_metadata_findings,
             },
+            "interpretive_status": interpretive_status,
             "passed": campaign_passed,
         },
     )
-    _write_report(summaries)
+    _write_report(
+        summaries,
+        campaign_passed=campaign_passed,
+        interpretive_status=interpretive_status,
+    )
     (RESULTS_ROOT / "failure.json").unlink(missing_ok=True)
     _manifest(summaries, config_path, raw_root=raw_root)
     passed = campaign_passed
