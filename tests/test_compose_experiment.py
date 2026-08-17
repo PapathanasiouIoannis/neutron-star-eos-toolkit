@@ -146,6 +146,24 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
             2.18,
         )
         self.assertFalse(by_slug["gm1y6"]["expected_optional_files"]["eos.mr"])
+        ordering_models = {
+            slug: model["ordering_analysis"]
+            for slug, model in by_slug.items()
+            if "ordering_analysis" in model
+        }
+        self.assertEqual(set(ordering_models), {"bsk26", "gm1y6"})
+        for ordering in ordering_models.values():
+            self.assertEqual(
+                ordering["acceptance_policy"], acquire.ORDERING_ACCEPTANCE_POLICY
+            )
+            self.assertTrue(ordering["analysis_policy_rationale"].strip())
+        self.assertEqual(
+            ordering_models["gm1y6"]["analysis_policy"],
+            "diagnostic_keep_later_monotone_subsequence",
+        )
+        self.assertIn(
+            "core-side", ordering_models["gm1y6"]["analysis_policy_rationale"]
+        )
         self.assertEqual(
             {
                 model["slug"]
@@ -286,6 +304,22 @@ class ComposeExperimentScaffoldTests(unittest.TestCase):
         with self.assertRaisesRegex(acquire.AcquisitionError, "duplicate slugs"):
             acquire.selected_models(self.config, ("apr", "apr"))
 
+    def test_ordering_registry_requires_declared_acceptance_and_rationale(
+        self,
+    ) -> None:
+        for field, replacement, message in (
+            ("acceptance_policy", "post_hoc_radius_tolerance", "acceptance_policy"),
+            ("analysis_policy_rationale", "", "analysis_policy_rationale"),
+        ):
+            with self.subTest(field=field):
+                config = copy.deepcopy(self.config)
+                bsk = next(
+                    model for model in config["models"] if model["slug"] == "bsk26"
+                )
+                bsk["ordering_analysis"][field] = replacement
+                with self.assertRaisesRegex(acquire.AcquisitionError, message):
+                    acquire.validate_config(config)
+
 
 class ComposeCampaignHardeningTests(unittest.TestCase):
     @classmethod
@@ -299,6 +333,131 @@ class ComposeCampaignHardeningTests(unittest.TestCase):
         self.assertFalse(runner._cs2_within_causal_threshold(1.0 + 2.0 * tolerance))
         self.assertFalse(runner._cs2_within_causal_threshold(0.0))
         self.assertFalse(runner._cs2_within_causal_threshold(float("nan")))
+
+    def test_sequence_merge_deduplicates_machine_precision_grid_overlap(
+        self,
+    ) -> None:
+        pressure = 100.0
+        epsilon = np.finfo(float).eps
+        near = pressure * (1.0 + 32.0 * epsilon)
+        distinct = pressure * (1.0 + 256.0 * epsilon)
+
+        def sequence_at(value: float) -> Any:
+            attempt = runner.SequenceAttempt(
+                central_pressure_mev_fm3=value,
+                status="failed",
+                star=None,
+                reason="synthetic",
+                reason_code="synthetic",
+            )
+            return runner.SequenceResult(
+                model_name="synthetic",
+                attempts=(attempt,),
+                status="partial",
+                boundary_status="synthetic",
+            )
+
+        baseline = sequence_at(pressure)
+        merged = runner._merge_sequences(
+            baseline,
+            (baseline, sequence_at(near), sequence_at(distinct)),
+        )
+        self.assertEqual(len(merged.attempts), 2)
+        self.assertEqual(
+            merged.attempts[0].central_pressure_mev_fm3,
+            pressure,
+        )
+        self.assertEqual(
+            merged.attempts[1].central_pressure_mev_fm3,
+            distinct,
+        )
+
+    def test_material_ordering_span_is_reported_but_catalogue_gates_acceptance(
+        self,
+    ) -> None:
+        gm = next(model for model in self.config["models"] if model["slug"] == "gm1y6")
+
+        def metrics(
+            *, radius_1_4: float, pre_peak_decreases: int = 0
+        ) -> dict[str, Any]:
+            return {
+                "sampled_peak": {"mass_msun": 2.2922, "radius_km": 12.13},
+                "at_1_4_msun": {"mass_msun": 1.4, "radius_km": radius_1_4},
+                "peak_bracketed_by_sampled_central_densities": True,
+                "pre_peak_mass_decrease_count": pre_peak_decreases,
+            }
+
+        baseline = metrics(radius_1_4=13.7570763)
+        alternative = metrics(radius_1_4=13.8650275)
+        assessment = runner._ordering_analysis_assessment(
+            gm,
+            baseline,
+            alternative,
+            baseline_remaining_failures=0,
+            alternative_remaining_failures=0,
+        )
+        self.assertTrue(assessment["acceptance_gate_passed"])
+        self.assertTrue(assessment["catalogue_consistency"]["both_reductions_passed"])
+        self.assertFalse(assessment["delta_within_nominal_tolerance"])
+        self.assertEqual(
+            assessment["classification"], "material_source_seam_systematic"
+        )
+        span = assessment["conditional_radius_span_at_1_4_msun_km"]
+        self.assertAlmostEqual(span["span"], 0.1079512)
+        self.assertFalse(assessment["physical_transition_resolved"])
+        self.assertFalse(assessment["conditional_span_is_statistical_uncertainty"])
+
+        summary = {
+            "model_id": gm["model_id"],
+            "metrics": baseline,
+            "ordering": {
+                "sensitivity": {
+                    "baseline_policy": gm["ordering_analysis"]["analysis_policy"],
+                    "alternative_policy": "diagnostic_monotone_subsequence",
+                    "alternative_metrics": alternative,
+                    **assessment,
+                }
+            },
+        }
+        report_line = runner._ordering_systematic_report_line(summary)
+        self.assertIn("conditionally reported, not seam-resolved", report_line)
+        self.assertIn("0.1080 km conditional span", report_line)
+        self.assertIn("not TOV error, statistical uncertainty", report_line)
+        self.assertIn("or a Maxwell construction", report_line)
+
+    def test_ordering_acceptance_rejects_failed_alternative_evidence(self) -> None:
+        gm = next(model for model in self.config["models"] if model["slug"] == "gm1y6")
+        baseline = {
+            "sampled_peak": {"mass_msun": 2.2922, "radius_km": 12.13},
+            "at_1_4_msun": {"mass_msun": 1.4, "radius_km": 13.757},
+            "peak_bracketed_by_sampled_central_densities": True,
+            "pre_peak_mass_decrease_count": 0,
+        }
+        for name, alternative, remaining_failures in (
+            (
+                "catalogue",
+                {
+                    **baseline,
+                    "at_1_4_msun": {"mass_msun": 1.4, "radius_km": 14.2},
+                },
+                0,
+            ),
+            ("sequence_failure", baseline, 1),
+            (
+                "pre_peak_decrease",
+                {**baseline, "pre_peak_mass_decrease_count": 1},
+                0,
+            ),
+        ):
+            with self.subTest(name=name):
+                assessment = runner._ordering_analysis_assessment(
+                    gm,
+                    baseline,
+                    alternative,
+                    baseline_remaining_failures=0,
+                    alternative_remaining_failures=remaining_failures,
+                )
+                self.assertFalse(assessment["acceptance_gate_passed"])
 
     def test_branch_metrics_distinguish_bracketing_and_pre_peak_decreases(
         self,

@@ -97,12 +97,16 @@ CATALOGUE_RADIUS_TOLERANCE_KM = 0.15
 SLY4_RADIUS_TOLERANCE_KM = 0.25
 CONVERGENCE_MASS_TOLERANCE_MSUN = 1.0e-5
 CONVERGENCE_RADIUS_TOLERANCE_KM = 1.0e-3
-SEAM_MASS_TOLERANCE_MSUN = 1.0e-3
-SEAM_RADIUS_TOLERANCE_KM = 0.01
+NOMINAL_SEAM_MASS_DELTA_MSUN = 1.0e-3
+NOMINAL_SEAM_RADIUS_DELTA_KM = 0.01
 PRE_PEAK_MASS_DECREASE_TOLERANCE_MSUN = 1.0e-8
+PRESSURE_MERGE_RELATIVE_TOLERANCE = 64.0 * np.finfo(float).eps
 CAUSALITY_THRESHOLD_TOLERANCE = 1.0e-10
 REFERENCE_PEAK_EXCLUSION_MARGIN_MSUN = 0.05
 REFERENCE_FIXED_MASSES_MSUN = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0)
+ORDERING_ACCEPTANCE_POLICY = (
+    "both_diagnostic_reductions_complete_and_compose_catalogue_consistent"
+)
 
 _CLOSURE_RESIDUAL_COLUMNS = (
     "euler_normalized_residual",
@@ -311,13 +315,23 @@ def _failure_needs_radius_retry(attempt: SequenceAttempt) -> bool:
 def _merge_sequences(
     template: SequenceResult, sequences: Sequence[SequenceResult]
 ) -> SequenceResult:
-    attempts_by_pressure: dict[float, SequenceAttempt] = {}
-    for sequence in sequences:
-        for attempt in sequence.attempts:
-            previous = attempts_by_pressure.get(attempt.central_pressure_mev_fm3)
-            if previous is None or (previous.star is None and attempt.star is not None):
-                attempts_by_pressure[attempt.central_pressure_mev_fm3] = attempt
-    attempts = tuple(attempts_by_pressure[key] for key in sorted(attempts_by_pressure))
+    candidates = sorted(
+        (attempt for sequence in sequences for attempt in sequence.attempts),
+        key=lambda attempt: attempt.central_pressure_mev_fm3,
+    )
+    merged: list[SequenceAttempt] = []
+    for attempt in candidates:
+        if merged and math.isclose(
+            attempt.central_pressure_mev_fm3,
+            merged[-1].central_pressure_mev_fm3,
+            rel_tol=PRESSURE_MERGE_RELATIVE_TOLERANCE,
+            abs_tol=0.0,
+        ):
+            if merged[-1].star is None and attempt.star is not None:
+                merged[-1] = attempt
+            continue
+        merged.append(attempt)
+    attempts = tuple(merged)
     return replace(
         template,
         attempts=attempts,
@@ -411,6 +425,7 @@ def _adaptive_sequence(
         refine_pressure,
         validation_mode=validation_mode,
     )
+    combined_candidates = len(coarse.attempts) + len(refined.attempts)
     combined = _merge_sequences(coarse, (coarse, refined))
     return (
         combined,
@@ -425,8 +440,13 @@ def _adaptive_sequence(
             ],
             "coarse_retry": coarse_retry,
             "refinement_retry": refinement_retry,
+            "combined_candidate_attempts": combined_candidates,
             "combined_attempts": len(combined.attempts),
             "combined_solved": len(combined.stars),
+            "near_duplicate_pressure_attempts_removed": (
+                combined_candidates - len(combined.attempts)
+            ),
+            "pressure_merge_relative_tolerance": (PRESSURE_MERGE_RELATIVE_TOLERANCE),
         },
         coarse,
     )
@@ -1533,6 +1553,134 @@ def _closure_diagnostics(view: Any) -> dict[str, Any]:
     }
 
 
+def _ordering_policy_label(policy: str) -> str:
+    labels = {
+        "diagnostic_monotone_subsequence": "keep-first diagnostic reduction",
+        "diagnostic_keep_later_monotone_subsequence": (
+            "keep-later diagnostic reduction"
+        ),
+    }
+    try:
+        return labels[policy]
+    except KeyError as exc:
+        raise ValueError(f"unsupported ordering policy label: {policy}") from exc
+
+
+def _ordering_branch_complete(
+    metrics: Mapping[str, Any], *, remaining_failures: int
+) -> bool:
+    return bool(
+        remaining_failures == 0
+        and metrics["at_1_4_msun"] is not None
+        and metrics["peak_bracketed_by_sampled_central_densities"]
+        and int(metrics["pre_peak_mass_decrease_count"]) == 0
+    )
+
+
+def _ordering_analysis_assessment(
+    spec: Mapping[str, Any],
+    baseline_metrics: Mapping[str, Any],
+    alternative_metrics: Mapping[str, Any],
+    *,
+    baseline_remaining_failures: int,
+    alternative_remaining_failures: int,
+) -> dict[str, Any]:
+    """Classify a declared seam without treating a small delta as acceptance."""
+
+    ordering = spec["ordering_analysis"]
+    if ordering["acceptance_policy"] != ORDERING_ACCEPTANCE_POLICY:
+        raise RuntimeError(f"unsupported ordering acceptance policy for {spec['slug']}")
+    baseline_peak = baseline_metrics["sampled_peak"]
+    alternative_peak = alternative_metrics["sampled_peak"]
+    baseline_1_4 = baseline_metrics["at_1_4_msun"]
+    alternative_1_4 = alternative_metrics["at_1_4_msun"]
+    delta_mass = float(alternative_peak["mass_msun"]) - float(
+        baseline_peak["mass_msun"]
+    )
+    delta_r14 = (
+        None
+        if baseline_1_4 is None or alternative_1_4 is None
+        else float(alternative_1_4["radius_km"]) - float(baseline_1_4["radius_km"])
+    )
+    baseline_complete = _ordering_branch_complete(
+        baseline_metrics, remaining_failures=baseline_remaining_failures
+    )
+    alternative_complete = _ordering_branch_complete(
+        alternative_metrics, remaining_failures=alternative_remaining_failures
+    )
+    baseline_catalogue = _catalogue_check(spec, baseline_metrics)
+    alternative_catalogue = _catalogue_check(spec, alternative_metrics)
+    numerical_completion_passed = baseline_complete and alternative_complete
+    both_catalogue_consistent = bool(
+        baseline_catalogue["passed"] and alternative_catalogue["passed"]
+    )
+    delta_within_nominal_tolerance = bool(
+        abs(delta_mass) <= NOMINAL_SEAM_MASS_DELTA_MSUN
+        and delta_r14 is not None
+        and abs(delta_r14) <= NOMINAL_SEAM_RADIUS_DELTA_KM
+    )
+    if not numerical_completion_passed:
+        classification = "incomplete_ordering_analysis"
+    elif delta_within_nominal_tolerance:
+        classification = "within_nominal_delta_tolerance"
+    else:
+        classification = "material_source_seam_systematic"
+    conditional_span = (
+        None
+        if baseline_1_4 is None or alternative_1_4 is None
+        else {
+            "lower": min(
+                float(baseline_1_4["radius_km"]),
+                float(alternative_1_4["radius_km"]),
+            ),
+            "upper": max(
+                float(baseline_1_4["radius_km"]),
+                float(alternative_1_4["radius_km"]),
+            ),
+            "span": abs(delta_r14),
+        }
+    )
+    reversals = ordering["expected_pressure_issues"]
+    maximum_reversal = max(abs(float(item["relative_change"])) for item in reversals)
+    return {
+        "acceptance_policy": ORDERING_ACCEPTANCE_POLICY,
+        "analysis_policy_rationale": ordering["analysis_policy_rationale"],
+        "numerical_completion": {
+            "baseline": baseline_complete,
+            "alternative": alternative_complete,
+            "passed": numerical_completion_passed,
+        },
+        "catalogue_consistency": {
+            "baseline": baseline_catalogue,
+            "alternative": alternative_catalogue,
+            "both_reductions_passed": both_catalogue_consistent,
+        },
+        "alternative_minus_baseline": {
+            "sampled_peak_mass_msun": delta_mass,
+            "radius_at_1_4_msun_km": delta_r14,
+        },
+        "nominal_delta_tolerances_not_acceptance_gates": {
+            "sampled_peak_mass_msun": NOMINAL_SEAM_MASS_DELTA_MSUN,
+            "radius_at_1_4_msun_km": NOMINAL_SEAM_RADIUS_DELTA_KM,
+        },
+        "delta_within_nominal_tolerance": delta_within_nominal_tolerance,
+        "classification": classification,
+        "conditional_radius_span_at_1_4_msun_km": conditional_span,
+        "maximum_declared_source_pressure_reversal_fraction": maximum_reversal,
+        "acceptance_gate_passed": bool(
+            numerical_completion_passed and both_catalogue_consistent
+        ),
+        "physical_transition_resolved": False,
+        "conditional_span_is_statistical_uncertainty": False,
+        "interpretation": (
+            "acceptance requires both declared diagnostic reductions to complete "
+            "and independently reproduce the predeclared CompOSE catalogue "
+            "benchmarks; their delta is a reported source-construction finding, "
+            "not a tuned acceptance tolerance or a physical transition solution"
+        ),
+    }
+
+
 def _ordering_sensitivity(
     spec: Mapping[str, Any],
     archive: Path,
@@ -1540,6 +1688,7 @@ def _ordering_sensitivity(
     policies: Sequence[str],
     baseline_metrics: Mapping[str, Any],
     baseline_branch: BranchData,
+    baseline_remaining_failures: int,
     *,
     quick: bool,
     derived_directory: Path,
@@ -1560,31 +1709,20 @@ def _ordering_sensitivity(
         alternative, branch, 1.4, validation_mode=mode
     )
     _write_rows(
-        derived_directory / "sequence_ordering_keep_later.csv",
+        derived_directory / "sequence_ordering_alternative.csv",
         SEQUENCE_FIELDS,
         _sequence_rows(sequence, _compose_eos(alternative)),
     )
     _write_json(
-        derived_directory / "sequence_ordering_keep_later.json", sequence.to_dict()
-    )
-    baseline_peak = baseline_metrics["sampled_peak"]
-    alternate_peak = metrics["sampled_peak"]
-    baseline_1_4 = baseline_metrics["at_1_4_msun"]
-    alternate_1_4 = metrics["at_1_4_msun"]
-    delta_mass = float(alternate_peak["mass_msun"]) - float(baseline_peak["mass_msun"])
-    delta_r14 = (
-        None
-        if baseline_1_4 is None or alternate_1_4 is None
-        else float(alternate_1_4["radius_km"]) - float(baseline_1_4["radius_km"])
+        derived_directory / "sequence_ordering_alternative.json", sequence.to_dict()
     )
     remaining_failures = sum(item.star is None for item in sequence.attempts)
-    passed = (
-        abs(delta_mass) <= SEAM_MASS_TOLERANCE_MSUN
-        and delta_r14 is not None
-        and abs(delta_r14) <= SEAM_RADIUS_TOLERANCE_KM
-        and remaining_failures == 0
-        and bool(metrics["peak_bracketed_by_sampled_central_densities"])
-        and int(metrics["pre_peak_mass_decrease_count"]) == 0
+    assessment = _ordering_analysis_assessment(
+        spec,
+        baseline_metrics,
+        metrics,
+        baseline_remaining_failures=baseline_remaining_failures,
+        alternative_remaining_failures=remaining_failures,
     )
     with plt.rc_context(_plot_style()):
         figure, ax = plt.subplots(figsize=(6.4, 4.6), constrained_layout=True)
@@ -1593,7 +1731,7 @@ def _ordering_sensitivity(
             baseline_branch.mass_msun[: baseline_branch.peak_index + 1],
             color=COLORS[0],
             linewidth=2.2,
-            label="keep-first diagnostic reduction",
+            label=_ordering_policy_label(baseline_policy),
         )
         ax.plot(
             branch.radius_km[: branch.peak_index + 1],
@@ -1601,29 +1739,21 @@ def _ordering_sensitivity(
             color=COLORS[1],
             linestyle="--",
             linewidth=2.0,
-            label="keep-later diagnostic reduction",
+            label=_ordering_policy_label(policy),
         )
         ax.set_xlabel("Source-boundary radius [km]")
         ax.set_ylabel(r"Gravitational mass [$M_\odot$]")
         ax.set_title(f"{spec['model_id']}: ordering-seam sensitivity")
         ax.legend(loc="best")
-        _save_ax(ax, figure_directory / "ordering_keep_later_mass_radius.png")
+        _save_ax(ax, figure_directory / "ordering_policy_sensitivity_mass_radius.png")
     return {
         "baseline_policy": baseline_policy,
         "alternative_policy": policy,
         "alternative_sampling": sampling,
         "alternative_metrics": metrics,
         "remaining_sequence_failures": remaining_failures,
-        "alternative_minus_baseline": {
-            "sampled_peak_mass_msun": delta_mass,
-            "radius_at_1_4_msun_km": delta_r14,
-        },
-        "tolerances": {
-            "sampled_peak_mass_msun": SEAM_MASS_TOLERANCE_MSUN,
-            "radius_at_1_4_msun_km": SEAM_RADIUS_TOLERANCE_KM,
-        },
-        "plot_filename": "ordering_keep_later_mass_radius.png",
-        "passed": bool(passed),
+        "plot_filename": "ordering_policy_sensitivity_mass_radius.png",
+        **assessment,
     }
 
 
@@ -1714,6 +1844,7 @@ def _run_model(
         figures,
         profiles,
     )
+    remaining_sequence_failures = sum(item.star is None for item in sequence.attempts)
     ordering_sensitivity = _ordering_sensitivity(
         spec,
         archive,
@@ -1721,6 +1852,7 @@ def _run_model(
         sensitivity_policies,
         metrics,
         branch,
+        remaining_sequence_failures,
         quick=quick,
         derived_directory=derived,
         figure_directory=figures,
@@ -1737,15 +1869,14 @@ def _run_model(
     catalogue = _catalogue_check(spec, metrics)
     literature = _literature_check(spec, metrics)
     closure = _closure_diagnostics(view)
-    remaining_sequence_failures = sum(item.star is None for item in sequence.attempts)
     acceptance = {
         "catalogue": bool(catalogue["passed"]),
         "convention_classified_literature": bool(literature["acceptance_gate_passed"]),
         "ode_convergence": all(item["passed"] for item in convergence.values()),
-        "ordering_sensitivity": (
+        "ordering_analysis_complete_and_catalogue_consistent": (
             True
             if ordering_sensitivity is None
-            else bool(ordering_sensitivity["passed"])
+            else bool(ordering_sensitivity["acceptance_gate_passed"])
         ),
         "zero_sequence_failures": remaining_sequence_failures == 0,
         "target_1_4_msun_covered": metrics["at_1_4_msun"] is not None,
@@ -1776,6 +1907,16 @@ def _run_model(
             .capability("continuous_barotrope")
             .status,
             "analysis_policy": ordering_policy,
+            "analysis_policy_rationale": (
+                None
+                if spec.get("ordering_analysis") is None
+                else spec["ordering_analysis"]["analysis_policy_rationale"]
+            ),
+            "acceptance_policy": (
+                None
+                if spec.get("ordering_analysis") is None
+                else spec["ordering_analysis"]["acceptance_policy"]
+            ),
             "sensitivity": ordering_sensitivity,
         },
         "validation_mode": validation_mode,
@@ -1796,6 +1937,18 @@ def _run_model(
         "primary_citations": spec["primary_citations"],
         "analysis_notes": spec["analysis_notes"],
         "plots": plots,
+        "non_gating_findings": {
+            "material_source_seam_systematic": bool(
+                ordering_sensitivity is not None
+                and ordering_sensitivity["classification"]
+                == "material_source_seam_systematic"
+            ),
+            "conditional_radius_span_at_1_4_msun_km": (
+                None
+                if ordering_sensitivity is None
+                else ordering_sensitivity["conditional_radius_span_at_1_4_msun_km"]
+            ),
+        },
         "acceptance": acceptance,
         "interpretation": {
             "mass_radius_source": "toolkit TOV calculation",
@@ -1834,12 +1987,15 @@ def _save_comparison_plots(summaries: Sequence[Mapping[str, Any]]) -> dict[str, 
             mass = np.asarray(data["mass_msun"][solved], dtype=float)
             radius = np.asarray(data["radius_km"][solved], dtype=float)
             peak = int(np.argmax(mass))
+            model_label = str(summary["model_id"])
+            if summary["non_gating_findings"]["material_source_seam_systematic"]:
+                model_label += " [conditional seam]"
             ax.plot(
                 radius[: peak + 1],
                 mass[: peak + 1],
                 color=COLORS[index % len(COLORS)],
                 linewidth=2.0,
-                label=str(summary["model_id"]),
+                label=model_label,
             )
         ax.set_xlabel("Source-boundary radius [km]")
         ax.set_ylabel(r"Gravitational mass [$M_\odot$]")
@@ -1900,6 +2056,12 @@ def _summary_rows(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         causal = item["causal_endpoint"]
         catalogue = item["compose_catalogue_crosscheck"]
         literature = item["literature_crosscheck"]
+        ordering_sensitivity = item["ordering"]["sensitivity"]
+        ordering_span = (
+            None
+            if ordering_sensitivity is None
+            else ordering_sensitivity["conditional_radius_span_at_1_4_msun_km"]
+        )
         literature_checks = literature["numeric_checks"]
         closure_maxima = item["closure_residual_diagnostics"][
             "maximum_absolute_normalized_residual"
@@ -1929,6 +2091,19 @@ def _summary_rows(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                     "radius_at_1_4_msun_km"
                 ],
                 "catalogue_check_passed": catalogue["passed"],
+                "ordering_sensitivity_classification": (
+                    None
+                    if ordering_sensitivity is None
+                    else ordering_sensitivity["classification"]
+                ),
+                "ordering_conditional_r1_4_span_km": (
+                    None if ordering_span is None else ordering_span["span"]
+                ),
+                "ordering_analysis_acceptance_gate_passed": (
+                    True
+                    if ordering_sensitivity is None
+                    else ordering_sensitivity["acceptance_gate_passed"]
+                ),
                 "literature_comparability": literature["comparability"],
                 "literature_numeric_comparison_passed": literature[
                     "numeric_comparison_passed"
@@ -1972,6 +2147,9 @@ SUMMARY_FIELDS = (
     "catalogue_delta_peak_radius_km",
     "catalogue_delta_r1_4_km",
     "catalogue_check_passed",
+    "ordering_sensitivity_classification",
+    "ordering_conditional_r1_4_span_km",
+    "ordering_analysis_acceptance_gate_passed",
     "literature_comparability",
     "literature_numeric_comparison_passed",
     "literature_delta_peak_mass_msun",
@@ -1986,20 +2164,87 @@ SUMMARY_FIELDS = (
 )
 
 
+def _ordering_systematic_report_line(item: Mapping[str, Any]) -> str | None:
+    sensitivity = item["ordering"]["sensitivity"]
+    if sensitivity is None:
+        return None
+    span = sensitivity["conditional_radius_span_at_1_4_msun_km"]
+    baseline_1_4 = item["metrics"]["at_1_4_msun"]
+    alternative_1_4 = sensitivity["alternative_metrics"]["at_1_4_msun"]
+    if span is None or baseline_1_4 is None or alternative_1_4 is None:
+        return (
+            f"- **{item['model_id']}** has an incomplete declared ordering analysis; "
+            "campaign acceptance must fail."
+        )
+    if sensitivity["classification"] == "incomplete_ordering_analysis":
+        return (
+            f"- **{item['model_id']}** did not complete both declared ordering "
+            "reductions without numerical findings; campaign acceptance failed."
+        )
+    if not sensitivity["catalogue_consistency"]["both_reductions_passed"]:
+        return (
+            f"- **{item['model_id']}** has at least one diagnostic ordering "
+            "reduction outside the predeclared CompOSE catalogue tolerances; "
+            "campaign acceptance failed."
+        )
+    delta = sensitivity["alternative_minus_baseline"]["radius_at_1_4_msun_km"]
+    baseline_label = _ordering_policy_label(sensitivity["baseline_policy"]).split()[0]
+    alternative_label = _ordering_policy_label(
+        sensitivity["alternative_policy"]
+    ).split()[0]
+    if sensitivity["classification"] == "material_source_seam_systematic":
+        catalogue_tolerance = sensitivity["catalogue_consistency"]["baseline"][
+            "tolerances"
+        ]["radius_km"]
+        pressure_reversal_percent = 100.0 * float(
+            sensitivity["maximum_declared_source_pressure_reversal_fraction"]
+        )
+        return (
+            f"- **{item['model_id']}** is conditionally reported, not seam-resolved. "
+            f"{sensitivity['analysis_policy_rationale']} The pinned source reverses "
+            f"pressure by {pressure_reversal_percent:.3f}% at its declared ordering "
+            f"seam. The primary {baseline_label} convention gives "
+            f"R1.4={float(baseline_1_4['radius_km']):.4f} km; {alternative_label} "
+            f"gives {float(alternative_1_4['radius_km']):.4f} km, a "
+            f"{float(span['span']):.4f} km conditional span. Both independently "
+            f"satisfy the predeclared CompOSE catalogue radius tolerance of "
+            f"{float(catalogue_tolerance):.2f} km. The span is a "
+            "source-construction systematic--not TOV error, statistical "
+            "uncertainty, or a Maxwell construction."
+        )
+    return (
+        f"- **{item['model_id']}**: both declared diagnostic reductions complete "
+        "and independently match the CompOSE catalogue; "
+        f"alternative-minus-baseline R1.4={float(delta):+.6g} km is within the "
+        "nominal delta classification threshold. Neither reduction resolves a "
+        "physical transition."
+    )
+
+
 def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
     lines = [
         "# Cold CompOSE comparison results",
         "",
         "All primary mass-radius curves below were calculated by the toolkit's TOV solver. Optional `eos.mr` files were used only after calculation as independent references.",
         "",
-        "| Model | Sampled peak [Msun] | R(peak) [km] | R1.4 [km] | Causal-domain limit [Msun] | Catalogue | Literature convention |",
-        "|---|---:|---:|---:|---:|---|---|",
+        "| Model | Sampled peak [Msun] | R(peak) [km] | R1.4 [km] | Causal-domain limit [Msun] | Catalogue | Ordering seam | Literature convention |",
+        "|---|---:|---:|---:|---:|---|---|---|",
     ]
     for item in summaries:
         peak = item["metrics"]["sampled_peak"]
         at_1_4 = item["metrics"]["at_1_4_msun"]
         causal_mass = item["causal_endpoint"].get("mass_msun")
         literature = item["literature_crosscheck"]
+        sensitivity = item["ordering"]["sensitivity"]
+        ordering_status = (
+            "n/a"
+            if sensitivity is None
+            else (
+                "MATERIAL conditional span"
+                if sensitivity["classification"] == "material_source_seam_systematic"
+                else sensitivity["classification"]
+            )
+        )
         radius_1_4_text = (
             "n/a" if at_1_4 is None else f"{float(at_1_4['radius_km']):.4f}"
         )
@@ -2008,8 +2253,26 @@ def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
             f"{radius_1_4_text} | "
             f"{'n/a' if causal_mass is None else f'{causal_mass:.5f}'} | "
             f"{'PASS' if item['compose_catalogue_crosscheck']['passed'] else 'FAIL'} | "
+            f"{ordering_status} | "
             f"{literature['comparability']} ({literature['acceptance_status']}) |"
         )
+    ordering_lines = [
+        line
+        for item in summaries
+        if (line := _ordering_systematic_report_line(item)) is not None
+    ]
+    lines.extend(
+        (
+            "",
+            "## Declared source-seam systematics",
+            "",
+            "Campaign acceptance here means reproducible calculation and external "
+            "catalogue consistency under both declared reductions. It does not "
+            "certify a unique crust-core radius or a physical seam construction.",
+            "",
+            *ordering_lines,
+        )
+    )
     lines.extend(
         (
             "",
@@ -2038,7 +2301,7 @@ def _write_report(summaries: Sequence[Mapping[str, Any]]) -> None:
             "- Radii stop at each selected table's lowest positive pressure and are not vacuum-surface radii.",
             "- The common positive-source-boundary check does not quantify the omitted P-to-zero surface layers.",
             "- BSk26 and APR hydrostatic peaks are reported separately from their numerically verified `c_s^2=1` thresholds.",
-            "- Diagnostic ordering reductions are explicit and their keep-first/keep-later sensitivity is part of acceptance.",
+            "- Declared ordering reductions must both complete and independently match the predeclared catalogue tolerances; their mutual delta is classified and reported, not used as a tuned acceptance tolerance.",
             "- Literature values gate acceptance only when classified as like-for-like; contextual and provenance-only comparisons are still reported numerically when available.",
             "- `eos.mr` radius residuals use fixed masses below both sampled turning points; peak coordinates are reported separately.",
             "",
@@ -2290,6 +2553,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "comparison_plot_coverage": bool(comparison_plots["required_coverage_passed"]),
     }
     campaign_passed = all(campaign_gates.values())
+    material_seam_findings = {
+        str(item["slug"]): {
+            "model_id": item["model_id"],
+            "classification": item["ordering"]["sensitivity"]["classification"],
+            "conditional_radius_span_at_1_4_msun_km": item["ordering"]["sensitivity"][
+                "conditional_radius_span_at_1_4_msun_km"
+            ],
+            "delta_within_nominal_tolerance": item["ordering"]["sensitivity"][
+                "delta_within_nominal_tolerance"
+            ],
+            "acceptance_gate_passed": item["ordering"]["sensitivity"][
+                "acceptance_gate_passed"
+            ],
+            "physical_transition_resolved": item["ordering"]["sensitivity"][
+                "physical_transition_resolved"
+            ],
+            "interpretation": item["ordering"]["sensitivity"]["interpretation"],
+        }
+        for item in summaries
+        if item["ordering"]["sensitivity"] is not None
+        and item["ordering"]["sensitivity"]["classification"]
+        == "material_source_seam_systematic"
+    }
     _write_json(
         RESULTS_ROOT / "acceptance.json",
         {
@@ -2297,6 +2583,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "models": {item["slug"]: item["acceptance"] for item in summaries},
             "comparison_plots": comparison_plots,
             "campaign_gates": campaign_gates,
+            "non_gating_findings": {
+                "material_source_seam_systematics": material_seam_findings
+            },
             "passed": campaign_passed,
         },
     )

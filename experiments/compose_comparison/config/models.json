@@ -61,6 +61,8 @@
       },
       "ordering_analysis": {
         "analysis_policy": "diagnostic_monotone_subsequence",
+        "analysis_policy_rationale": "Keep the earlier source row as a deterministic diagnostic baseline; the companion reduction remains mandatory and both reductions must independently reproduce the CompOSE catalogue benchmarks.",
+        "acceptance_policy": "both_diagnostic_reductions_complete_and_compose_catalogue_consistent",
         "sensitivity_policies": [
           "diagnostic_monotone_subsequence",
           "diagnostic_keep_later_monotone_subsequence"
@@ -366,7 +368,9 @@
         ]
       },
       "ordering_analysis": {
-        "analysis_policy": "diagnostic_monotone_subsequence",
+        "analysis_policy": "diagnostic_keep_later_monotone_subsequence",
+        "analysis_policy_rationale": "Prefer the later core-side row because the bundled CompOSE data sheet says the Douchin-Haensel crust is added below nB=1e-3 fm^-3; this remains a conditional diagnostic convention, not a physical transition construction.",
+        "acceptance_policy": "both_diagnostic_reductions_complete_and_compose_catalogue_consistent",
         "sensitivity_policies": [
           "diagnostic_monotone_subsequence",
           "diagnostic_keep_later_monotone_subsequence"

@@ -25,6 +25,9 @@ DEFAULT_CONFIG = EXPERIMENT_ROOT / "config" / "models.json"
 DEFAULT_RAW_ROOT = EXPERIMENT_ROOT / "data" / "raw"
 REGISTRY_SCHEMA_VERSION = "compose-comparison-model-registry-v1"
 ACQUISITION_SCHEMA_VERSION = "compose-comparison-acquisition-v1"
+ORDERING_ACCEPTANCE_POLICY = (
+    "both_diagnostic_reductions_complete_and_compose_catalogue_consistent"
+)
 _SLUG = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -212,6 +215,17 @@ def validate_config(payload: object) -> dict[str, Any]:
             if ordering.get("analysis_policy") not in policies:
                 raise AcquisitionError(
                     f"{slug}.ordering_analysis.analysis_policy is unsupported"
+                )
+            if ordering.get("acceptance_policy") != ORDERING_ACCEPTANCE_POLICY:
+                raise AcquisitionError(
+                    f"{slug}.ordering_analysis.acceptance_policy must be "
+                    f"{ORDERING_ACCEPTANCE_POLICY!r}"
+                )
+            rationale = ordering.get("analysis_policy_rationale")
+            if not isinstance(rationale, str) or not rationale.strip():
+                raise AcquisitionError(
+                    f"{slug}.ordering_analysis.analysis_policy_rationale "
+                    "must be non-empty"
                 )
             sensitivity = ordering.get("sensitivity_policies")
             if (

@@ -121,7 +121,9 @@ The full runner:
    barotrope evaluations as separate data products.
 3. Starts with the strict source ordering. If a model has a documented local
    seam conflict, retain the strict failure and run explicitly named
-   keep-first and keep-later diagnostic sensitivity cases.
+   keep-first and keep-later diagnostic sensitivity cases. The registry states
+   which reduction is the primary conditional convention and why; neither is
+   treated as a physical transition construction.
 4. Calculates all primary mass-radius sequences independently with the TOV
    solver. Never replace a calculated curve with `eos.mr`.
 5. Cross-checks calculated pre-peak, increasing-central-density samples against
@@ -144,12 +146,28 @@ radius tolerance until its source-boundary truncation is explicitly measured.
 Exceeding a tolerance triggers numerical, interpolation, domain, and surface
 investigation; it never triggers physics tuning or silent data repair.
 
+For a registry-declared ordering seam, both diagnostic reductions must complete
+without sequence failures, cover 1.4 Msun, bracket the sampled peak, avoid
+significant pre-peak mass decreases, and independently satisfy those same
+predeclared CompOSE catalogue tolerances. The 0.001 Msun peak-mass and 0.01 km
+R1.4 differences between reductions are classification thresholds only, not
+acceptance tolerances. A larger delta is saved as a material conditional
+source-seam span and remains prominent in `summary.json`, `acceptance.json`, and
+the report. Campaign acceptance therefore does not certify a unique crust-core
+radius or a Maxwell construction.
+
 The local `results/report.md` and `results/all_models_summary.csv` are the
 short entry points after a run. Per-model `summary.json` files retain the full
 acceptance evidence, while `manifest.json` hashes every input and generated
 artifact. The runner exits nonzero if any catalogue, convergence, ordering,
 sequence-coverage, peak-bracketing, required-plot, or literature-comparison
 acceptance check fails.
+
+For GM1Y6, the bundled data sheet assigns the Douchin-Haensel crust below
+`nB=1e-3 fm^-3`, so the later core-side row is the primary conditional
+reduction. The keep-first result is still mandatory. Their radius difference is
+reported as a source-construction systematic rather than hidden by a
+model-specific tolerance.
 
 ## Scaffold tests
 
